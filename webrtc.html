@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>High-Fidelity WebRTC Chat</title>
+    <style>
+        /* Modern Dark Theme */
+        body { font-family: -apple-system, sans-serif; background: #121212; color: white; display: flex; height: 100vh; margin: 0; overflow: hidden; }
+        
+        /* Sidebar (Login & Users) */
+        .sidebar { width: 250px; background: #1e1e1e; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 20px; position: relative; }
+        .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; }
+
+        /* Login Section */
+        #login-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #121212; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        input { padding: 12px; border-radius: 8px; border: 1px solid #444; background: #222; color: white; outline: none; margin-bottom: 10px; width: 200px; text-align: center; }
+        button { padding: 12px 24px; border-radius: 8px; border: none; background: #00e676; color: #000; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover { filter: brightness(1.1); }
+        button:active { transform: scale(0.98); }
+
+        /* Sidebar Controls */
+        .sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
+        #logout-btn { background: #d32f2f; color: white; padding: 8px; width: 100%; font-size: 13px; }
+
+        /* Chat Area */
+        #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+        .msg { max-width: 70%; padding: 10px 15px; border-radius: 15px; font-size: 15px; line-height: 1.4; word-wrap: break-word; }
+        .msg.mine { align-self: flex-end; background: #00e676; color: black; border-bottom-right-radius: 2px; }
+        .msg.theirs { align-self: flex-start; background: #333; border-bottom-left-radius: 2px; }
+        .msg img { max-width: 100%; border-radius: 8px; margin-top: 5px; cursor: pointer; }
+        .msg-info { font-size: 11px; opacity: 0.7; margin-bottom: 2px; }
+
+        /* Input Area */
+        .input-bar { padding: 15px; background: #1e1e1e; display: flex; gap: 10px; border-top: 1px solid #333; align-items: center; }
+        #msg-input { flex: 1; text-align: left; }
+        
+        /* Utility Buttons */
+        .icon-btn { background: transparent; color: #888; font-size: 20px; padding: 5px 10px; }
+        .icon-btn:hover { background: #333; color: white; }
+        
+        #mute-btn { background: #252525; color: #00e676; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 20px; padding: 0; }
+        #mute-btn.muted { background: #d32f2f; color: white; }
+
+        /* File Input Styling */
+        .file-label { cursor: pointer; font-size: 20px; padding: 10px; color: #888; }
+        .file-label:hover { color: white; }
+        
+        /* User List */
+        .user-item { padding: 10px; background: #252525; margin-bottom: 5px; border-radius: 5px; font-size: 14px; display: flex; align-items: center; gap: 10px; }
+        .status-dot { width: 8px; height: 8px; background: #00e676; border-radius: 50%; }
+        .ping-badge { margin-left: auto; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #333; color: #888; font-family: monospace; min-width: 35px; text-align: center; }
+
+        /* --- NEW: Searching Animation & State --- */
+        #searching-container {
+            margin-top: 20px;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            font-size: 13px;
+            display: none; /* Hidden by default */
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .radar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: rgba(0, 230, 118, 0.2);
+            position: relative;
+        }
+        
+        .radar::after {
+            content: '';
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 10px; height: 10px;
+            background: #00e676;
+            border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.7);
+            animation: pulse-green 1.5s infinite;
+        }
+
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.7); }
+            70% { box-shadow: 0 0 0 20px rgba(0, 230, 118, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 230, 118, 0); }
+        }
+
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <h1>🚀 Super Chat</h1>
+        <p style="color:#888;">High Quality Voice + Text + Files</p>
+        <input type="text" id="username" placeholder="Your Name">
+        <input type="password" id="room-pass" placeholder="Room Password">
+        <button id="join-btn">Join Room</button>
+    </div>
+
+    <div class="sidebar">
+        <h3>👥 Users</h3>
+        <div id="user-list"></div>
+        
+        <div id="searching-container">
+            <div class="radar"></div>
+            <div>Searching for peers...<br><span style="font-size:11px; opacity:0.6;">Share link to invite</span></div>
+        </div>
+
+        <div class="sidebar-footer">
+            <div style="color: #666; font-size: 12px; text-align: center;">
+                Status: <span style="color: #00e676;">Connected</span>
+            </div>
+            <button id="logout-btn">Logout</button>
+        </div>
+    </div>
+
+    <div class="main-area">
+        <div id="messages"></div>
+        
+        <div class="input-bar">
+            <button id="mute-btn" title="Toggle Mic">🎤</button>
+
+            <input type="file" id="file-input" style="display: none;">
+            <label for="file-input" class="file-label" title="Send File/Photo">📎</label>
+            
+            <input type="text" id="msg-input" placeholder="Type a message...">
+            <button id="send-btn">Send</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import { joinRoom } from 'https://cdn.jsdelivr.net/npm/trystero@0.16.0/+esm';
+
+        // --- SOUND EFFECTS (Base64 Encoded to avoid external files) ---
+        // Simple "Ding" for Join
+        const joinSfx = new Audio("data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="); 
+        // Note: The above is a dummy placeholder to init the object. 
+        // Real short tones below:
+        const soundJoin = new Audio("https://cdn.freesound.org/previews/270/270404_5123851-lq.mp3"); // Short beep
+        const soundLeave = new Audio("https://cdn.freesound.org/previews/332/332669_5923594-lq.mp3"); // Pop sound
+        
+        // Volume adjustment
+        soundJoin.volume = 0.4;
+        soundLeave.volume = 0.4;
+
+        // --- DOM Elements ---
+        const loginScreen = document.getElementById('login-screen');
+        const userList = document.getElementById('user-list');
+        const searchingUI = document.getElementById('searching-container'); // NEW
+        const messagesDiv = document.getElementById('messages');
+        const msgInput = document.getElementById('msg-input');
+        const sendBtn = document.getElementById('send-btn');
+        const fileInput = document.getElementById('file-input');
+        const muteBtn = document.getElementById('mute-btn');
+        const logoutBtn = document.getElementById('logout-btn');
+
+        // --- State ---
+        let room;
+        let myName = "";
+        let peers = {}; 
+        let activePeerCount = 0; // NEW: Track count for searching UI
+        let pingInterval;
+        let currentPingId = 0;
+        let localStream = null;
+        let isMuted = false;
+
+        // --- Initialize ---
+        document.getElementById('join-btn').onclick = async () => {
+            myName = document.getElementById('username').value.trim() || "Anon";
+            
+            // Get what the user typed
+            const userPasswordInput = document.getElementById('room-pass').value.trim();
+            
+            // Set your 1 static password here
+            const STATIC_PASSWORD = "secretpassword";
+
+            // Check if what they typed matches the static password
+            if (userPasswordInput !== STATIC_PASSWORD) {
+                return alert("Incorrect password! Access denied.");
+            }
+
+            // 1. Get Audio
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: true, 
+                        noiseSuppression: false,
+                        autoGainControl: false, 
+                        sampleRate: 48000 
+                    } 
+                });
+            } catch (err) {
+                console.error("No mic:", err);
+                muteBtn.style.display = 'none'; 
+            }
+
+            // 2. UI Updates
+            loginScreen.style.display = 'none';
+            addSystemMsg(`You joined as <b>${myName}</b>`);
+            addUserToSidebar("You (Me)", "me", false);
+            updateSearchStatus(); // Check initial status
+
+            // 3. Connect Trystero
+            const config = { appId: 'super-chat-v3' };
+            // Pass the static password to create the room hash
+            room = joinRoom(config, STATIC_PASSWORD);
+
+            // --- Voice ---
+            if (localStream) room.addStream(localStream);
+            
+            room.onPeerStream((stream, peerId) => {
+                const audio = new Audio();
+                audio.srcObject = stream;
+                audio.autoplay = true;
+            });
+
+            // --- Unified Data Channel ---
+            const [sendData, getData] = room.makeAction('session');
+            const [sendFile, getFile] = room.makeAction('file');
+
+            // --- Handlers ---
+            room.onPeerJoin(peerId => {
+                activePeerCount++;
+                updateSearchStatus();
+                soundJoin.play().catch(e => console.log("Audio play blocked", e)); // Play Sound
+                
+                sendData({ type: 'name', value: myName }, peerId);
+                addUserToSidebar("User " + peerId.substring(0,4), peerId, true);
+                if (localStream) room.addStream(localStream, peerId);
+            });
+
+            room.onPeerLeave(peerId => {
+                activePeerCount--;
+                updateSearchStatus();
+                soundLeave.play().catch(e => console.log("Audio play blocked", e)); // Play Sound
+
+                const name = peers[peerId] || `User ${peerId.substring(0,4)}`;
+                addSystemMsg(`${name} left.`);
+                removeUserFromSidebar(peerId);
+            });
+
+            getData((data, peerId) => {
+                switch(data.type) {
+                    case 'text':
+                        const name = peers[peerId] || "Unknown";
+                        addMessage(data.value, name, 'theirs');
+                        break;
+                    case 'name':
+                        peers[peerId] = data.value;
+                        updateUserInSidebar(peerId, data.value);
+                        addSystemMsg(`${data.value} joined.`);
+                        break;
+                    case 'ping':
+                        sendData({ type: 'pong', id: data.id }, peerId);
+                        break;
+                    case 'pong':
+                        if (data.id === currentPingId) {
+                            updatePingDisplay(peerId, Date.now() - currentPingId);
+                        }
+                        break;
+                }
+            });
+
+            getFile((fileData, peerId, metadata) => {
+                const name = peers[peerId] || "Unknown";
+                handleReceivedFile(fileData, metadata, name);
+            });
+
+            // --- Ping Loop ---
+            pingInterval = setInterval(() => {
+                currentPingId = Date.now();
+                sendData({ type: 'ping', id: currentPingId });
+            }, 2000);
+
+            // --- Send Actions ---
+            sendBtn.onclick = () => {
+                const text = msgInput.value;
+                if (!text) return;
+                sendData({ type: 'text', value: text });
+                addMessage(text, "You", 'mine');
+                msgInput.value = "";
+            };
+
+            msgInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') sendBtn.click();
+            });
+
+            fileInput.onchange = async () => {
+                const file = fileInput.files[0];
+                if (!file) return;
+                addSystemMsg(`Sending ${file.name}...`);
+                sendFile(file, null, { name: file.name, type: file.type });
+
+                if (file.type.startsWith('image/')) {
+                    const url = URL.createObjectURL(file);
+                    addMessage(`<img src="${url}">`, "You sent a photo", 'mine');
+                } else {
+                    addMessage(`<div>📂 Shared file: ${file.name}</div>`, "You", 'mine');
+                }
+                fileInput.value = ""; 
+            };
+        };
+
+        // --- Logic ---
+
+        function updateSearchStatus() {
+            if (activePeerCount === 0) {
+                searchingUI.style.display = 'flex';
+            } else {
+                searchingUI.style.display = 'none';
+            }
+        }
+
+        muteBtn.onclick = () => {
+            if (!localStream) return;
+            const audioTrack = localStream.getAudioTracks()[0];
+            isMuted = !isMuted;
+            audioTrack.enabled = !isMuted;
+
+            if (isMuted) {
+                muteBtn.innerHTML = "🔇";
+                muteBtn.classList.add('muted');
+            } else {
+                muteBtn.innerHTML = "🎤";
+                muteBtn.classList.remove('muted');
+            }
+        };
+
+        logoutBtn.onclick = () => {
+            clearInterval(pingInterval);
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            if (room) {
+                room.leave();
+                room = null;
+            }
+            location.reload(); 
+        };
+
+        // --- UI Helpers ---
+
+        function addMessage(content, user, type) {
+            const div = document.createElement('div');
+            div.className = `msg ${type}`;
+            div.innerHTML = `<div class="msg-info">${user}</div><div>${content}</div>`;
+            messagesDiv.appendChild(div);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function handleReceivedFile(data, metadata, user) {
+            const blob = new Blob([data], { type: metadata.type });
+            const url = URL.createObjectURL(blob);
+            if (metadata.type.startsWith('image/')) {
+                addMessage(`<img src="${url}">`, user, 'theirs');
+            } else {
+                addMessage(`<div>📂 ${metadata.name}</div><a href="${url}" download="${metadata.name}" style="color: #00e676; display:block; margin-top:5px;">Download</a>`, user, 'theirs');
+            }
+        }
+
+        function addSystemMsg(text) {
+            const div = document.createElement('div');
+            div.style.textAlign = "center"; div.style.fontSize = "12px"; div.style.color = "#666"; div.style.margin = "10px 0";
+            div.innerHTML = text;
+            messagesDiv.appendChild(div);
+        }
+
+        function addUserToSidebar(name, id, showPing = true) {
+            const div = document.createElement('div');
+            div.className = 'user-item';
+            div.id = `sidebar-${id}`;
+            const pingHtml = showPing ? `<span id="ping-${id}" class="ping-badge">--ms</span>` : '';
+            div.innerHTML = `<div class="status-dot"></div> <span class="u-name">${name}</span> ${pingHtml}`;
+            userList.appendChild(div);
+        }
+
+        function updateUserInSidebar(id, newName) {
+            const el = document.getElementById(`sidebar-${id}`);
+            if (el) el.querySelector('.u-name').innerText = newName;
+        }
+
+        function removeUserFromSidebar(id) {
+            const el = document.getElementById(`sidebar-${id}`);
+            if (el) el.remove();
+        }
+
+        function updatePingDisplay(peerId, ms) {
+            const el = document.getElementById(`ping-${peerId}`);
+            if (el) {
+                el.innerText = ms + "ms";
+                if (ms < 100) el.style.color = "#00e676";
+                else if (ms < 300) el.style.color = "#ffeb3b";
+                else el.style.color = "#f44336";
+            }
+        }
+    </script>
+</body>
+</html>
