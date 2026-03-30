@@ -122,6 +122,11 @@
         const fileInput = document.getElementById('file-input');
         const muteBtn = document.getElementById('mute-btn');
         const statusText = document.getElementById('conn-status');
+        
+        // Login elements
+        const usernameInput = document.getElementById('username');
+        const roomPassInput = document.getElementById('room-pass');
+        const joinBtn = document.getElementById('join-btn');
 
         // --- State ---
         let myName = "";
@@ -148,10 +153,17 @@
             }
         };
 
+        // --- Login Quality of Life: Press Enter to Join ---
+        const triggerLoginOnEnter = (e) => {
+            if (e.key === 'Enter') joinBtn.click();
+        };
+        usernameInput.addEventListener('keypress', triggerLoginOnEnter);
+        roomPassInput.addEventListener('keypress', triggerLoginOnEnter);
+
         // --- Initialize ---
-        document.getElementById('join-btn').onclick = async () => {
-            myName = document.getElementById('username').value.trim() || "Anon";
-            const userPasswordInput = document.getElementById('room-pass').value.trim();
+        joinBtn.onclick = async () => {
+            myName = usernameInput.value.trim() || "Anon";
+            const userPasswordInput = roomPassInput.value.trim();
             
             const STATIC_PASSWORD = "secretpassword";
             if (userPasswordInput !== STATIC_PASSWORD) {
@@ -187,8 +199,8 @@
         // --- Connection Loop (Self-Healing) ---
         function startPeerConnection() {
             searchingUI.style.display = 'flex';
-            statusText.innerText = "Waiting..."; // Fixed to match original UI
-            statusText.style.color = "#ffeb3b";  // Yellow
+            statusText.innerText = "Waiting..."; 
+            statusText.style.color = "#ffeb3b";  
 
             peer = new Peer(ROOM_ID, peerConfig);
 
@@ -289,9 +301,8 @@
                 playLeaveSound();
                 document.getElementById('sidebar-them')?.remove();
                 
-                // Fixed to match original UI on disconnect
                 statusText.innerText = "Waiting...";
-                statusText.style.color = "#ffeb3b"; // Yellow
+                statusText.style.color = "#ffeb3b"; 
                 searchingUI.style.display = 'flex';
                 msgInput.disabled = true;
                 sendBtn.disabled = true;
