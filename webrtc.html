@@ -136,21 +136,16 @@
         import { joinRoom } from 'https://cdn.jsdelivr.net/npm/trystero@0.16.0/+esm';
 
         // --- SOUND EFFECTS (Base64 Encoded to avoid external files) ---
-        // Simple "Ding" for Join
-        const joinSfx = new Audio("data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="); 
-        // Note: The above is a dummy placeholder to init the object. 
-        // Real short tones below:
-        const soundJoin = new Audio("https://cdn.freesound.org/previews/270/270404_5123851-lq.mp3"); // Short beep
-        const soundLeave = new Audio("https://cdn.freesound.org/previews/332/332669_5923594-lq.mp3"); // Pop sound
+        const soundJoin = new Audio("https://cdn.freesound.org/previews/270/270404_5123851-lq.mp3"); 
+        const soundLeave = new Audio("https://cdn.freesound.org/previews/332/332669_5923594-lq.mp3"); 
         
-        // Volume adjustment
         soundJoin.volume = 0.4;
         soundLeave.volume = 0.4;
 
         // --- DOM Elements ---
         const loginScreen = document.getElementById('login-screen');
         const userList = document.getElementById('user-list');
-        const searchingUI = document.getElementById('searching-container'); // NEW
+        const searchingUI = document.getElementById('searching-container');
         const messagesDiv = document.getElementById('messages');
         const msgInput = document.getElementById('msg-input');
         const sendBtn = document.getElementById('send-btn');
@@ -162,7 +157,7 @@
         let room;
         let myName = "";
         let peers = {}; 
-        let activePeerCount = 0; // NEW: Track count for searching UI
+        let activePeerCount = 0; 
         let pingInterval;
         let currentPingId = 0;
         let localStream = null;
@@ -202,10 +197,19 @@
             loginScreen.style.display = 'none';
             addSystemMsg(`You joined as <b>${myName}</b>`);
             addUserToSidebar("You (Me)", "me", false);
-            updateSearchStatus(); // Check initial status
+            updateSearchStatus();
 
-            // 3. Connect Trystero
-            const config = { appId: 'super-chat-v3' };
+            // 3. Connect Trystero with STUN Servers
+            const config = { 
+                appId: 'super-chat-v3',
+                rtcConfig: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                }
+            };
+            
             // Pass the static password to create the room hash
             room = joinRoom(config, STATIC_PASSWORD);
 
@@ -226,7 +230,7 @@
             room.onPeerJoin(peerId => {
                 activePeerCount++;
                 updateSearchStatus();
-                soundJoin.play().catch(e => console.log("Audio play blocked", e)); // Play Sound
+                soundJoin.play().catch(e => console.log("Audio play blocked", e)); 
                 
                 sendData({ type: 'name', value: myName }, peerId);
                 addUserToSidebar("User " + peerId.substring(0,4), peerId, true);
@@ -236,7 +240,7 @@
             room.onPeerLeave(peerId => {
                 activePeerCount--;
                 updateSearchStatus();
-                soundLeave.play().catch(e => console.log("Audio play blocked", e)); // Play Sound
+                soundLeave.play().catch(e => console.log("Audio play blocked", e)); 
 
                 const name = peers[peerId] || `User ${peerId.substring(0,4)}`;
                 addSystemMsg(`${name} left.`);
