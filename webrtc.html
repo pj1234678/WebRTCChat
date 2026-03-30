@@ -95,7 +95,7 @@
         </div>
     </div>
 
-    <script>
+<script>
         // --- NATIVE WEB AUDIO SFX ---
         function playBeep(freq, type) {
             try {
@@ -129,8 +129,9 @@
         let localStream = null;
         let isMuted = false;
         
-        let peer;           // Our PeerJS instance
-        let chatConn;       // The active data connection
+        let peer;           
+        let chatConn;       
+        let ROOM_ID = ""; // Made global so we can reconnect
 
         // File Receiving State
         let incomingFileMeta = null;
@@ -157,7 +158,7 @@
                 return alert("Incorrect password! Access denied.");
             }
 
-            const ROOM_ID = "superchat-room-v1-" + STATIC_PASSWORD;
+            ROOM_ID = "superchat-room-v1-" + STATIC_PASSWORD;
 
             // 1. Get Audio (Forced Studio Quality)
             try {
@@ -178,9 +179,18 @@
             loginScreen.style.display = 'none';
             addSystemMsg(`You joined as <b>${myName}</b>`);
             addUserToSidebar("You (Me)", "me");
-            searchingUI.style.display = 'flex';
+            
+            // 3. Start Connection Loop
+            startPeerConnection();
+        };
 
-            // 3. Connect to PeerJS with custom STUN servers
+        // --- Connection Loop (Self-Healing) ---
+        function startPeerConnection() {
+            searchingUI.style.display = 'flex';
+            statusText.innerText = "Searching...";
+            statusText.style.color = "#ffeb3b";
+
+            // Attempt to become the Host
             peer = new Peer(ROOM_ID, peerConfig);
 
             // IF WE ARE THE HOST:
@@ -222,10 +232,10 @@
                         }
                     });
                 } else {
-                    alert("Connection error: " + err.type);
+                    console.error("PeerJS Error:", err);
                 }
             });
-        };
+        }
 
         // --- Networking Logic ---
         function setupDataConnection(conn) {
@@ -250,17 +260,14 @@
                 } else if (data.type === 'text') {
                     addMessage(data.value, theirName, 'theirs');
                 } else if (data.type === 'file-meta') {
-                    // Prepare to receive chunks
                     incomingFileMeta = data;
                     fileChunks = [];
                     bytesReceived = 0;
                     addSystemMsg(`Receiving ${data.name}...`);
                 } else if (data.type === 'file-chunk') {
-                    // Accumulate file chunks
                     fileChunks.push(data.data);
                     bytesReceived += data.data.byteLength;
                     
-                    // If we have received all bytes, reconstruct the file!
                     if (bytesReceived >= incomingFileMeta.size) {
                         const blob = new Blob(fileChunks, { type: incomingFileMeta.fileType });
                         const url = URL.createObjectURL(blob);
@@ -271,7 +278,6 @@
                             addMessage(`<div>📂 ${incomingFileMeta.name}</div><a href="${url}" download="${incomingFileMeta.name}" style="color: #00e676; display:block; margin-top:5px;">Download</a>`, theirName, 'theirs');
                         }
                         
-                        // Reset receiver state
                         incomingFileMeta = null;
                         fileChunks = [];
                         bytesReceived = 0;
@@ -279,15 +285,23 @@
                 }
             });
 
+            // --- THE FIX: Self-Healing Disconnect ---
             chatConn.on('close', () => {
                 addSystemMsg(`<b>${theirName}</b> left the room.`);
                 playLeaveSound();
                 document.getElementById('sidebar-them')?.remove();
-                statusText.innerText = "Disconnected";
-                statusText.style.color = "#f44336";
+                
+                statusText.innerText = "Reconnecting...";
+                statusText.style.color = "#ffeb3b";
                 searchingUI.style.display = 'flex';
                 msgInput.disabled = true;
                 sendBtn.disabled = true;
+
+                // Destroy the dead connection and restart the search loop
+                if (peer) peer.destroy();
+                setTimeout(() => {
+                    startPeerConnection();
+                }, 1500); // 1.5 second delay prevents network spam
             });
         }
 
@@ -305,35 +319,29 @@
             if (e.key === 'Enter') sendBtn.click();
         });
 
-        // Advanced File Transfer (Chunking)
         fileInput.onchange = async () => {
             const file = fileInput.files[0];
             if (!file || !chatConn || !chatConn.open) return;
             
             addSystemMsg(`Sending ${file.name}...`);
             
-            // 1. Send Metadata first
             chatConn.send({ type: 'file-meta', name: file.name, fileType: file.type, size: file.size });
             
-            // 2. Read and slice the file into 16KB chunks
-            const chunkSize = 16 * 1024; // 16KB
+            const chunkSize = 16 * 1024; 
             let offset = 0;
             
             while (offset < file.size) {
                 const chunk = file.slice(offset, offset + chunkSize);
                 const buffer = await chunk.arrayBuffer();
                 
-                // Safety check: Prevent overflowing WebRTC's buffer (Wait if buffer > 1MB)
                 while (chatConn.dataChannel.bufferedAmount > 1024 * 1024) {
                     await new Promise(r => setTimeout(r, 50));
                 }
                 
-                // Send the raw binary chunk
                 chatConn.send({ type: 'file-chunk', data: buffer });
                 offset += chunkSize;
             }
             
-            // 3. Post a message to our own screen once done
             if (file.type.startsWith('image/')) {
                 const localUrl = URL.createObjectURL(file);
                 addMessage(`<img src="${localUrl}">`, "You sent a photo", 'mine');
