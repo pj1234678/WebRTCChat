@@ -132,23 +132,43 @@
         let peer;           // Our PeerJS instance
         let chatConn;       // The active data connection
 
+        // File Receiving State
+        let incomingFileMeta = null;
+        let fileChunks = [];
+        let bytesReceived = 0;
+
+        // Optimized WebRTC Configuration
+        const peerConfig = {
+            config: {
+                'iceServers': [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            }
+        };
+
         // --- Initialize ---
         document.getElementById('join-btn').onclick = async () => {
             myName = document.getElementById('username').value.trim() || "Anon";
             const userPasswordInput = document.getElementById('room-pass').value.trim();
             
-            // The single static password
             const STATIC_PASSWORD = "secretpassword";
             if (userPasswordInput !== STATIC_PASSWORD) {
                 return alert("Incorrect password! Access denied.");
             }
 
-            // This unique string becomes the "Room Name" on PeerJS
             const ROOM_ID = "superchat-room-v1-" + STATIC_PASSWORD;
 
-            // 1. Get Audio
+            // 1. Get Audio (Forced Studio Quality)
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { 
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        sampleRate: 48000
+                    } 
+                });
             } catch (err) {
                 console.warn("No mic found or permission denied.");
                 muteBtn.style.display = 'none'; 
@@ -160,22 +180,19 @@
             addUserToSidebar("You (Me)", "me");
             searchingUI.style.display = 'flex';
 
-            // 3. Connect to PeerJS 
-            // We TRY to claim the Room ID. If we get it, we are the Host.
-            peer = new Peer(ROOM_ID);
+            // 3. Connect to PeerJS with custom STUN servers
+            peer = new Peer(ROOM_ID, peerConfig);
 
             // IF WE ARE THE HOST:
             peer.on('open', (id) => {
                 console.log("Room Created! Waiting for guest...");
                 
-                // Wait for Guest to connect data channel
                 peer.on('connection', (conn) => {
                     setupDataConnection(conn);
                 });
 
-                // Wait for Guest to call us with their audio
                 peer.on('call', (call) => {
-                    call.answer(localStream); // Send our mic
+                    call.answer(localStream); 
                     call.on('stream', (remoteStream) => {
                         const audio = new Audio();
                         audio.srcObject = remoteStream;
@@ -189,15 +206,12 @@
                 if (err.type === 'unavailable-id') {
                     console.log("Room already exists! Joining as Guest...");
                     
-                    // Generate a random ID for ourselves
-                    peer = new Peer(); 
+                    peer = new Peer(peerConfig); 
                     
                     peer.on('open', () => {
-                        // Connect to the Host's data channel
                         const conn = peer.connect(ROOM_ID);
                         setupDataConnection(conn);
 
-                        // Call the Host and send our audio
                         if (localStream) {
                             const call = peer.call(ROOM_ID, localStream);
                             call.on('stream', (remoteStream) => {
@@ -224,7 +238,6 @@
                 msgInput.disabled = false;
                 sendBtn.disabled = false;
                 
-                // Tell them our name immediately
                 chatConn.send({ type: 'name', value: myName });
             });
 
@@ -236,8 +249,33 @@
                     playJoinSound();
                 } else if (data.type === 'text') {
                     addMessage(data.value, theirName, 'theirs');
-                } else if (data.type === 'file') {
-                    handleReceivedFile(data);
+                } else if (data.type === 'file-meta') {
+                    // Prepare to receive chunks
+                    incomingFileMeta = data;
+                    fileChunks = [];
+                    bytesReceived = 0;
+                    addSystemMsg(`Receiving ${data.name}...`);
+                } else if (data.type === 'file-chunk') {
+                    // Accumulate file chunks
+                    fileChunks.push(data.data);
+                    bytesReceived += data.data.byteLength;
+                    
+                    // If we have received all bytes, reconstruct the file!
+                    if (bytesReceived >= incomingFileMeta.size) {
+                        const blob = new Blob(fileChunks, { type: incomingFileMeta.fileType });
+                        const url = URL.createObjectURL(blob);
+                        
+                        if (incomingFileMeta.fileType.startsWith('image/')) {
+                            addMessage(`<img src="${url}">`, theirName, 'theirs');
+                        } else {
+                            addMessage(`<div>📂 ${incomingFileMeta.name}</div><a href="${url}" download="${incomingFileMeta.name}" style="color: #00e676; display:block; margin-top:5px;">Download</a>`, theirName, 'theirs');
+                        }
+                        
+                        // Reset receiver state
+                        incomingFileMeta = null;
+                        fileChunks = [];
+                        bytesReceived = 0;
+                    }
                 }
             });
 
@@ -267,28 +305,41 @@
             if (e.key === 'Enter') sendBtn.click();
         });
 
-        // Simple File Transfer
-        fileInput.onchange = () => {
+        // Advanced File Transfer (Chunking)
+        fileInput.onchange = async () => {
             const file = fileInput.files[0];
             if (!file || !chatConn || !chatConn.open) return;
             
             addSystemMsg(`Sending ${file.name}...`);
-            const reader = new FileReader();
             
-            reader.onload = (e) => {
-                const base64Data = e.target.result;
-                try {
-                    chatConn.send({ type: 'file', name: file.name, fileType: file.type, data: base64Data });
-                    if (file.type.startsWith('image/')) {
-                        addMessage(`<img src="${base64Data}">`, "You sent a photo", 'mine');
-                    } else {
-                        addMessage(`<div>📂 Shared file: ${file.name}</div>`, "You", 'mine');
-                    }
-                } catch (err) {
-                    alert("File is too large to send! Try a smaller image.");
+            // 1. Send Metadata first
+            chatConn.send({ type: 'file-meta', name: file.name, fileType: file.type, size: file.size });
+            
+            // 2. Read and slice the file into 16KB chunks
+            const chunkSize = 16 * 1024; // 16KB
+            let offset = 0;
+            
+            while (offset < file.size) {
+                const chunk = file.slice(offset, offset + chunkSize);
+                const buffer = await chunk.arrayBuffer();
+                
+                // Safety check: Prevent overflowing WebRTC's buffer (Wait if buffer > 1MB)
+                while (chatConn.dataChannel.bufferedAmount > 1024 * 1024) {
+                    await new Promise(r => setTimeout(r, 50));
                 }
-            };
-            reader.readAsDataURL(file);
+                
+                // Send the raw binary chunk
+                chatConn.send({ type: 'file-chunk', data: buffer });
+                offset += chunkSize;
+            }
+            
+            // 3. Post a message to our own screen once done
+            if (file.type.startsWith('image/')) {
+                const localUrl = URL.createObjectURL(file);
+                addMessage(`<img src="${localUrl}">`, "You sent a photo", 'mine');
+            } else {
+                addMessage(`<div>📂 Shared file: ${file.name}</div>`, "You", 'mine');
+            }
             fileInput.value = ""; 
         };
 
@@ -314,14 +365,6 @@
             div.innerHTML = `<div class="msg-info">${user}</div><div>${content}</div>`;
             messagesDiv.appendChild(div);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        }
-
-        function handleReceivedFile(dataObj) {
-            if (dataObj.fileType.startsWith('image/')) {
-                addMessage(`<img src="${dataObj.data}">`, theirName, 'theirs');
-            } else {
-                addMessage(`<div>📂 ${dataObj.name}</div><a href="${dataObj.data}" download="${dataObj.name}" style="color: #00e676; display:block; margin-top:5px;">Download</a>`, theirName, 'theirs');
-            }
         }
 
         function addSystemMsg(text) {
