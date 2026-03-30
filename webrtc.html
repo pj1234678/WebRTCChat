@@ -131,7 +131,7 @@
         
         let peer;           
         let chatConn;       
-        let ROOM_ID = ""; // Made global so we can reconnect
+        let ROOM_ID = ""; 
 
         // File Receiving State
         let incomingFileMeta = null;
@@ -187,10 +187,9 @@
         // --- Connection Loop (Self-Healing) ---
         function startPeerConnection() {
             searchingUI.style.display = 'flex';
-            statusText.innerText = "Searching...";
-            statusText.style.color = "#ffeb3b";
+            statusText.innerText = "Waiting..."; // Fixed to match original UI
+            statusText.style.color = "#ffeb3b";  // Yellow
 
-            // Attempt to become the Host
             peer = new Peer(ROOM_ID, peerConfig);
 
             // IF WE ARE THE HOST:
@@ -285,23 +284,22 @@
                 }
             });
 
-            // --- THE FIX: Self-Healing Disconnect ---
             chatConn.on('close', () => {
                 addSystemMsg(`<b>${theirName}</b> left the room.`);
                 playLeaveSound();
                 document.getElementById('sidebar-them')?.remove();
                 
-                statusText.innerText = "Reconnecting...";
-                statusText.style.color = "#ffeb3b";
+                // Fixed to match original UI on disconnect
+                statusText.innerText = "Waiting...";
+                statusText.style.color = "#ffeb3b"; // Yellow
                 searchingUI.style.display = 'flex';
                 msgInput.disabled = true;
                 sendBtn.disabled = true;
 
-                // Destroy the dead connection and restart the search loop
                 if (peer) peer.destroy();
                 setTimeout(() => {
                     startPeerConnection();
-                }, 1500); // 1.5 second delay prevents network spam
+                }, 1500); 
             });
         }
 
