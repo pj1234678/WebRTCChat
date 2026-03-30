@@ -50,37 +50,20 @@
         .status-dot { width: 8px; height: 8px; background: #00e676; border-radius: 50%; }
         .ping-badge { margin-left: auto; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #333; color: #888; font-family: monospace; min-width: 35px; text-align: center; }
 
-        /* --- NEW: Searching Animation & State --- */
+        /* Searching Animation */
         #searching-container {
-            margin-top: 20px;
-            padding: 20px;
-            text-align: center;
-            color: #666;
-            font-size: 13px;
-            display: none; /* Hidden by default */
-            flex-direction: column;
-            align-items: center;
-            gap: 15px;
+            margin-top: 20px; padding: 20px; text-align: center; color: #666; font-size: 13px;
+            display: none; flex-direction: column; align-items: center; gap: 15px;
         }
 
         .radar {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: rgba(0, 230, 118, 0.2);
-            position: relative;
+            width: 40px; height: 40px; border-radius: 50%; background: rgba(0, 230, 118, 0.2); position: relative;
         }
         
         .radar::after {
-            content: '';
-            position: absolute;
-            top: 50%; left: 50%;
-            transform: translate(-50%, -50%);
-            width: 10px; height: 10px;
-            background: #00e676;
-            border-radius: 50%;
-            box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.7);
-            animation: pulse-green 1.5s infinite;
+            content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 10px; height: 10px; background: #00e676; border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.7); animation: pulse-green 1.5s infinite;
         }
 
         @keyframes pulse-green {
@@ -88,7 +71,6 @@
             70% { box-shadow: 0 0 0 20px rgba(0, 230, 118, 0); }
             100% { box-shadow: 0 0 0 0 rgba(0, 230, 118, 0); }
         }
-
     </style>
 </head>
 <body>
@@ -123,24 +105,35 @@
         
         <div class="input-bar">
             <button id="mute-btn" title="Toggle Mic">🎤</button>
-
             <input type="file" id="file-input" style="display: none;">
             <label for="file-input" class="file-label" title="Send File/Photo">📎</label>
-            
             <input type="text" id="msg-input" placeholder="Type a message...">
             <button id="send-btn">Send</button>
         </div>
     </div>
 
     <script type="module">
-        import { joinRoom } from 'https://cdn.jsdelivr.net/npm/trystero@0.16.0/+esm';
+        // Using MQTT signaling to bypass strict network firewalls
+        import { joinRoom } from 'https://cdn.jsdelivr.net/npm/trystero@0.16.0/mqtt/+esm';
 
-        // --- SOUND EFFECTS (Base64 Encoded to avoid external files) ---
-        const soundJoin = new Audio("https://cdn.freesound.org/previews/270/270404_5123851-lq.mp3"); 
-        const soundLeave = new Audio("https://cdn.freesound.org/previews/332/332669_5923594-lq.mp3"); 
-        
-        soundJoin.volume = 0.4;
-        soundLeave.volume = 0.4;
+        // --- NATIVE WEB AUDIO SFX (No external file dependencies) ---
+        function playBeep(freq, type) {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, ctx.currentTime);
+                gain.gain.setValueAtTime(0.1, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.3);
+            } catch (e) { console.log("Audio skipped"); }
+        }
+        const playJoinSound = () => playBeep(880, 'sine'); // High beep
+        const playLeaveSound = () => playBeep(440, 'triangle'); // Low boop
 
         // --- DOM Elements ---
         const loginScreen = document.getElementById('login-screen');
@@ -166,14 +159,9 @@
         // --- Initialize ---
         document.getElementById('join-btn').onclick = async () => {
             myName = document.getElementById('username').value.trim() || "Anon";
-            
-            // Get what the user typed
             const userPasswordInput = document.getElementById('room-pass').value.trim();
-            
-            // Set your 1 static password here
             const STATIC_PASSWORD = "secretpassword";
 
-            // Check if what they typed matches the static password
             if (userPasswordInput !== STATIC_PASSWORD) {
                 return alert("Incorrect password! Access denied.");
             }
@@ -181,12 +169,7 @@
             // 1. Get Audio
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        echoCancellation: true, 
-                        noiseSuppression: false,
-                        autoGainControl: false, 
-                        sampleRate: 48000 
-                    } 
+                    audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 } 
                 });
             } catch (err) {
                 console.error("No mic:", err);
@@ -201,7 +184,7 @@
 
             // 3. Connect Trystero with STUN Servers
             const config = { 
-                appId: 'super-chat-v3',
+                appId: 'super-chat-v4',
                 rtcConfig: {
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
@@ -210,7 +193,6 @@
                 }
             };
             
-            // Pass the static password to create the room hash
             room = joinRoom(config, STATIC_PASSWORD);
 
             // --- Voice ---
@@ -230,7 +212,7 @@
             room.onPeerJoin(peerId => {
                 activePeerCount++;
                 updateSearchStatus();
-                soundJoin.play().catch(e => console.log("Audio play blocked", e)); 
+                playJoinSound();
                 
                 sendData({ type: 'name', value: myName }, peerId);
                 addUserToSidebar("User " + peerId.substring(0,4), peerId, true);
@@ -240,7 +222,7 @@
             room.onPeerLeave(peerId => {
                 activePeerCount--;
                 updateSearchStatus();
-                soundLeave.play().catch(e => console.log("Audio play blocked", e)); 
+                playLeaveSound();
 
                 const name = peers[peerId] || `User ${peerId.substring(0,4)}`;
                 addSystemMsg(`${name} left.`);
@@ -310,7 +292,6 @@
         };
 
         // --- Logic ---
-
         function updateSearchStatus() {
             if (activePeerCount === 0) {
                 searchingUI.style.display = 'flex';
@@ -348,7 +329,6 @@
         };
 
         // --- UI Helpers ---
-
         function addMessage(content, user, type) {
             const div = document.createElement('div');
             div.className = `msg ${type}`;
