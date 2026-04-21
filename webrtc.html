@@ -163,7 +163,7 @@
         joinBtn.onclick = async () => {
             myName = usernameInput.value.trim() || "Anon";
             const userPasswordInput = roomPassInput.value.trim();
-            const STATIC_PASSWORD = "secretpassword"; // Change this if needed
+            const STATIC_PASSWORD = "secretpassword"; 
             
             if (userPasswordInput !== STATIC_PASSWORD) return alert("Incorrect password! Access denied.");
             ROOM_ID = "superconf-mesh-" + STATIC_PASSWORD;
@@ -189,6 +189,10 @@
             // Attempt to become Host
             peer = new Peer(ROOM_ID, peerConfig);
 
+            // Listeners for the Host
+            peer.on('connection', (conn) => handleNewConnection(conn));
+            peer.on('call', (call) => handleNewCall(call));
+
             peer.on('open', (id) => {
                 myId = id;
                 isHost = true;
@@ -196,14 +200,19 @@
                 statusText.style.color = "#00e676";
                 
                 addSystemMsg(`You created the room as <b>${myName}</b>`);
-                addUserToSidebar(myName, "me"); // Now we safely know we are the host
+                addUserToSidebar(myName, "me"); 
                 enableChat();
             });
 
             // If room exists, join as Guest
             peer.on('error', (err) => {
                 if (err.type === 'unavailable-id') {
+                    // Create NEW peer for Guest
                     peer = new Peer(peerConfig); 
+                    
+                    // CRITICAL FIX: Attach listeners to the NEW guest peer so they can hear other guests!
+                    peer.on('connection', (conn) => handleNewConnection(conn));
+                    peer.on('call', (call) => handleNewCall(call));
                     
                     peer.on('open', (id) => {
                         myId = id;
@@ -212,18 +221,15 @@
                         statusText.style.color = "#00e676";
 
                         addSystemMsg(`You joined the room as <b>${myName}</b>`);
-                        addUserToSidebar(myName, "me"); // Safely added as Guest
+                        addUserToSidebar(myName, "me"); 
                         
-                        connectToPeer(ROOM_ID); // Connect to the Host
+                        connectToPeer(ROOM_ID); // Connect to the Host to start the mesh
                         enableChat();
                     });
                 } else {
                     console.error("PeerJS Error:", err);
                 }
             });
-
-            peer.on('connection', (conn) => handleNewConnection(conn));
-            peer.on('call', (call) => handleNewCall(call));
         }
 
         function connectToPeer(targetId) {
@@ -238,15 +244,14 @@
         }
 
         function handleNewConnection(conn) {
-            // FIX: Handle PeerJS open race condition
             const setupData = () => {
                 searchingUI.style.display = 'none';
                 connections[conn.peer] = conn;
                 
-                // Always send our name to the new connection
+                // Introduce ourselves
                 conn.send({ type: 'name', value: myName });
 
-                // If Host, immediately share the peer list
+                // If we are the Host, tell this new person who else is in the room
                 if (isHost) {
                     const otherPeers = Object.keys(connections).filter(id => id !== conn.peer);
                     if (otherPeers.length > 0) {
@@ -268,7 +273,7 @@
                     playJoinSound();
                 } 
                 else if (data.type === 'peer-list' || data.type === 'mesh-sync') {
-                    // FIX: Connect to missing peers from Host's sync pulse
+                    // Guest receives the roster from the Host and cross-connects
                     data.peers.forEach(peerId => {
                         if (peerId !== myId && !connections[peerId]) connectToPeer(peerId);
                     });
@@ -395,7 +400,7 @@
 
         // --- Mesh Sync & Ping Loop ---
         setInterval(() => {
-            // FIX: Host continually reminds the room of the active roster
+            // Host continually reminds the room of the active roster
             if (isHost) {
                 const activePeers = Object.keys(connections);
                 if (activePeers.length > 0) broadcastData({ type: 'mesh-sync', peers: activePeers });
@@ -443,10 +448,9 @@
             messagesDiv.appendChild(div);
         }
 
-        // FIX: Reworked Sidebar Badging
         function addUserToSidebar(name, id) {
             if (document.getElementById(`sidebar-${id}`)) {
-                // Update Name if it changes (prevents duplication)
+                // Update Name if it changes
                 document.getElementById(`name-${id}`).innerText = name;
                 return;
             }
@@ -458,15 +462,12 @@
             let displayName = name;
             let rightSideHtml = '';
 
-            // Assign Badges & Pings correctly based on peer Identity
             if (id === "me") {
                 displayName += " (You)";
                 rightSideHtml = isHost ? `<span class="host-badge">Host</span>` : `<span class="guest-badge">Guest</span>`;
             } else if (id === ROOM_ID) {
-                // We know this specific remote ID belongs to the Host
                 rightSideHtml = `<span class="host-badge">Host</span> <span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
             } else {
-                // Standard remote Guest
                 rightSideHtml = `<span class="guest-badge">Guest</span> <span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
             }
 
