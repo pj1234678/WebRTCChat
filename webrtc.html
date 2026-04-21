@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>High-Fidelity WebRTC Chat</title>
-    <script src="peerjs.min.js"></script>
+    <title>High-Fidelity WebRTC Mesh Chat</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         /* Modern Dark Theme */
         body { font-family: -apple-system, sans-serif; background: #121212; color: white; display: flex; height: 100vh; margin: 0; overflow: hidden; }
         
         /* Sidebar (Login & Users) */
-        .sidebar { width: 250px; background: #1e1e1e; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 20px; position: relative; }
+        .sidebar { width: 280px; background: #1e1e1e; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 20px; position: relative; }
         .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; }
 
         /* Login Section */
@@ -39,16 +39,21 @@
         .icon-btn { background: transparent; color: #888; font-size: 20px; padding: 5px 10px; }
         .icon-btn:hover { background: #333; color: white; }
         
-        #mute-btn { background: #252525; color: #00e676; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 20px; padding: 0; }
+        #mute-btn { background: #252525; color: #00e676; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 20px; padding: 0; border-radius: 8px; cursor: pointer; border: none; }
         #mute-btn.muted { background: #d32f2f; color: white; }
 
         /* File Input Styling */
         .file-label { cursor: pointer; font-size: 20px; padding: 10px; color: #888; }
         .file-label:hover { color: white; }
         
-        /* User List */
-        .user-item { padding: 10px; background: #252525; margin-bottom: 5px; border-radius: 5px; font-size: 14px; display: flex; align-items: center; gap: 10px; }
+        /* User List & Ping */
+        .user-item { padding: 10px; background: #252525; margin-bottom: 5px; border-radius: 5px; font-size: 14px; display: flex; align-items: center; justify-content: space-between; }
+        .user-left { display: flex; align-items: center; gap: 10px; }
         .status-dot { width: 8px; height: 8px; background: #00e676; border-radius: 50%; }
+        .ping-display { font-size: 11px; color: #888; background: #111; padding: 2px 6px; border-radius: 4px; font-family: monospace; }
+        .ping-good { color: #00e676; }
+        .ping-med { color: #ffeb3b; }
+        .ping-bad { color: #d32f2f; }
 
         /* Searching Animation */
         #searching-container { margin-top: 20px; padding: 20px; text-align: center; color: #666; font-size: 13px; display: none; flex-direction: column; align-items: center; gap: 15px; }
@@ -60,27 +65,27 @@
 <body>
 
     <div id="login-screen">
-        <h1>🚀 Super Chat</h1>
-        <p style="color:#888;">High Quality Voice + Text + Files</p>
+        <h1>🚀 Super Mesh Chat</h1>
+        <p style="color:#888;">Multi-User Voice + Text + Files</p>
         <input type="text" id="username" placeholder="Your Name">
         <input type="password" id="room-pass" placeholder="Room Password">
         <button id="join-btn">Join Room</button>
     </div>
 
     <div class="sidebar">
-        <h3>👥 Users</h3>
+        <h3>👥 Connected Users</h3>
         <div id="user-list"></div>
         
         <div id="searching-container">
             <div class="radar"></div>
-            <div>Searching for peer...<br><span style="font-size:11px; opacity:0.6;">Share password to invite</span></div>
+            <div>Waiting for peers...<br><span style="font-size:11px; opacity:0.6;">Share password to invite</span></div>
         </div>
 
         <div class="sidebar-footer">
             <div style="color: #666; font-size: 12px; text-align: center;">
-                Status: <span id="conn-status" style="color: #ffeb3b;">Waiting...</span>
+                Network: <span id="conn-status" style="color: #ffeb3b;">Connecting...</span>
             </div>
-            <button id="logout-btn">Logout</button>
+            <button id="logout-btn">Leave Room</button>
         </div>
     </div>
 
@@ -103,7 +108,7 @@
                 const osc = ctx.createOscillator();
                 const gain = ctx.createGain();
                 osc.type = type; osc.frequency.setValueAtTime(freq, ctx.currentTime);
-                gain.gain.setValueAtTime(0.1, ctx.currentTime);
+                gain.gain.setValueAtTime(0.05, ctx.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
                 osc.connect(gain); gain.connect(ctx.destination);
                 osc.start(); osc.stop(ctx.currentTime + 0.3);
@@ -122,28 +127,23 @@
         const fileInput = document.getElementById('file-input');
         const muteBtn = document.getElementById('mute-btn');
         const statusText = document.getElementById('conn-status');
-        
-        // Login elements
         const usernameInput = document.getElementById('username');
         const roomPassInput = document.getElementById('room-pass');
         const joinBtn = document.getElementById('join-btn');
 
-        // --- State ---
+        // --- Mesh Networking State ---
         let myName = "";
-        let theirName = "Unknown Peer";
+        let myId = "";
+        let isHost = false;
+        let peer;            
+        let ROOM_ID = ""; 
         let localStream = null;
         let isMuted = false;
         
-        let peer;           
-        let chatConn;       
-        let ROOM_ID = ""; 
+        const connections = {}; // Keeps track of all open DataChannels
+        const peerNames = {};   // Maps peer IDs to Usernames
+        const fileTransfers = {}; // Keeps track of incoming files per peer
 
-        // File Receiving State
-        let incomingFileMeta = null;
-        let fileChunks = [];
-        let bytesReceived = 0;
-
-        // Optimized WebRTC Configuration
         const peerConfig = {
             config: {
                 'iceServers': [
@@ -153,10 +153,8 @@
             }
         };
 
-        // --- Login Quality of Life: Press Enter to Join ---
-        const triggerLoginOnEnter = (e) => {
-            if (e.key === 'Enter') joinBtn.click();
-        };
+        // --- Login Quality of Life ---
+        const triggerLoginOnEnter = (e) => { if (e.key === 'Enter') joinBtn.click(); };
         usernameInput.addEventListener('keypress', triggerLoginOnEnter);
         roomPassInput.addEventListener('keypress', triggerLoginOnEnter);
 
@@ -164,162 +162,192 @@
         joinBtn.onclick = async () => {
             myName = usernameInput.value.trim() || "Anon";
             const userPasswordInput = roomPassInput.value.trim();
-            
             const STATIC_PASSWORD = "secretpassword";
-            if (userPasswordInput !== STATIC_PASSWORD) {
-                return alert("Incorrect password! Access denied.");
-            }
+            
+            if (userPasswordInput !== STATIC_PASSWORD) return alert("Incorrect password! Access denied.");
+            ROOM_ID = "superchat-mesh-" + STATIC_PASSWORD;
 
-            ROOM_ID = "superchat-room-v1-" + STATIC_PASSWORD;
-
-            // 1. Get Audio (Forced Studio Quality)
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { 
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 48000
-                    } 
+                    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } 
                 });
             } catch (err) {
                 console.warn("No mic found or permission denied.");
                 muteBtn.style.display = 'none'; 
             }
 
-            // 2. UI Updates
             loginScreen.style.display = 'none';
             addSystemMsg(`You joined as <b>${myName}</b>`);
             addUserToSidebar("You (Me)", "me");
             
-            // 3. Start Connection Loop
-            startPeerConnection();
+            initPeerJS();
         };
 
-        // --- Connection Loop (Self-Healing) ---
-        function startPeerConnection() {
+        // --- Core Mesh Logic ---
+        function initPeerJS() {
             searchingUI.style.display = 'flex';
-            statusText.innerText = "Waiting..."; 
-            statusText.style.color = "#ffeb3b";  
+            statusText.innerText = "Initializing...";
 
+            // 1. Attempt to create the room (Become Host)
             peer = new Peer(ROOM_ID, peerConfig);
 
-            // IF WE ARE THE HOST:
             peer.on('open', (id) => {
-                console.log("Room Created! Waiting for guest...");
-                
-                peer.on('connection', (conn) => {
-                    setupDataConnection(conn);
-                });
-
-                peer.on('call', (call) => {
-                    call.answer(localStream); 
-                    call.on('stream', (remoteStream) => {
-                        const audio = new Audio();
-                        audio.srcObject = remoteStream;
-                        audio.autoplay = true;
-                    });
-                });
+                myId = id;
+                isHost = true;
+                console.log("I am the Host.");
+                statusText.innerText = "Host Ready";
+                statusText.style.color = "#00e676";
+                enableChat();
             });
 
-            // IF THE ROOM ALREADY EXISTS (WE ARE THE GUEST):
+            // 2. If room exists, we fail to become Host. Catch error and become Guest.
             peer.on('error', (err) => {
                 if (err.type === 'unavailable-id') {
-                    console.log("Room already exists! Joining as Guest...");
-                    
+                    console.log("Room exists. Joining as Guest...");
                     peer = new Peer(peerConfig); 
                     
-                    peer.on('open', () => {
-                        const conn = peer.connect(ROOM_ID);
-                        setupDataConnection(conn);
-
-                        if (localStream) {
-                            const call = peer.call(ROOM_ID, localStream);
-                            call.on('stream', (remoteStream) => {
-                                const audio = new Audio();
-                                audio.srcObject = remoteStream;
-                                audio.autoplay = true;
-                            });
-                        }
+                    peer.on('open', (id) => {
+                        myId = id;
+                        isHost = false;
+                        statusText.innerText = "Connecting to Mesh...";
+                        connectToPeer(ROOM_ID); // Connect to Host
+                        enableChat();
                     });
                 } else {
                     console.error("PeerJS Error:", err);
                 }
             });
+
+            // 3. Handle INCOMING connections
+            peer.on('connection', (conn) => handleNewConnection(conn));
+            peer.on('call', (call) => handleNewCall(call));
         }
 
-        // --- Networking Logic ---
-        function setupDataConnection(conn) {
-            chatConn = conn;
+        function connectToPeer(targetId) {
+            if (connections[targetId] || targetId === myId) return; // Prevent duplicates/self-connect
             
-            chatConn.on('open', () => {
-                searchingUI.style.display = 'none';
-                statusText.innerText = "Connected";
-                statusText.style.color = "#00e676";
-                msgInput.disabled = false;
-                sendBtn.disabled = false;
-                
-                chatConn.send({ type: 'name', value: myName });
-            });
+            const conn = peer.connect(targetId);
+            handleNewConnection(conn);
 
-            chatConn.on('data', (data) => {
-                if (data.type === 'name') {
-                    theirName = data.value;
-                    addUserToSidebar(theirName, 'them');
-                    addSystemMsg(`<b>${theirName}</b> joined the room.`);
-                    playJoinSound();
-                } else if (data.type === 'text') {
-                    addMessage(data.value, theirName, 'theirs');
-                } else if (data.type === 'file-meta') {
-                    incomingFileMeta = data;
-                    fileChunks = [];
-                    bytesReceived = 0;
-                    addSystemMsg(`Receiving ${data.name}...`);
-                } else if (data.type === 'file-chunk') {
-                    fileChunks.push(data.data);
-                    bytesReceived += data.data.byteLength;
-                    
-                    if (bytesReceived >= incomingFileMeta.size) {
-                        const blob = new Blob(fileChunks, { type: incomingFileMeta.fileType });
-                        const url = URL.createObjectURL(blob);
-                        
-                        if (incomingFileMeta.fileType.startsWith('image/')) {
-                            addMessage(`<img src="${url}">`, theirName, 'theirs');
-                        } else {
-                            addMessage(`<div>📂 ${incomingFileMeta.name}</div><a href="${url}" download="${incomingFileMeta.name}" style="color: #00e676; display:block; margin-top:5px;">Download</a>`, theirName, 'theirs');
-                        }
-                        
-                        incomingFileMeta = null;
-                        fileChunks = [];
-                        bytesReceived = 0;
+            if (localStream) {
+                const call = peer.call(targetId, localStream);
+                handleNewCall(call);
+            }
+        }
+
+        function handleNewConnection(conn) {
+            conn.on('open', () => {
+                searchingUI.style.display = 'none';
+                connections[conn.peer] = conn;
+                conn.send({ type: 'name', value: myName });
+
+                // If I am the Host, tell the new person about everyone else so they can connect
+                if (isHost) {
+                    const otherPeers = Object.keys(connections).filter(id => id !== conn.peer);
+                    if (otherPeers.length > 0) {
+                        conn.send({ type: 'peer-list', peers: otherPeers });
                     }
                 }
             });
 
-            chatConn.on('close', () => {
-                addSystemMsg(`<b>${theirName}</b> left the room.`);
-                playLeaveSound();
-                document.getElementById('sidebar-them')?.remove();
-                
-                statusText.innerText = "Waiting...";
-                statusText.style.color = "#ffeb3b"; 
-                searchingUI.style.display = 'flex';
-                msgInput.disabled = true;
-                sendBtn.disabled = true;
+            conn.on('data', (data) => {
+                const senderId = conn.peer;
 
-                if (peer) peer.destroy();
-                setTimeout(() => {
-                    startPeerConnection();
-                }, 1500); 
+                if (data.type === 'name') {
+                    peerNames[senderId] = data.value;
+                    addUserToSidebar(data.value, senderId);
+                    addSystemMsg(`<b>${data.value}</b> joined the mesh.`);
+                    playJoinSound();
+                } 
+                else if (data.type === 'peer-list') {
+                    // Host sent us the list of other guests. Connect to them!
+                    data.peers.forEach(peerId => connectToPeer(peerId));
+                } 
+                else if (data.type === 'text') {
+                    addMessage(data.value, peerNames[senderId] || "Unknown", 'theirs');
+                } 
+                else if (data.type === 'ping') {
+                    conn.send({ type: 'pong', time: data.time }); // Send it straight back
+                } 
+                else if (data.type === 'pong') {
+                    const latency = Date.now() - data.time;
+                    updatePingUI(senderId, latency);
+                }
+                // --- FILE HANDLING (ISOLATED PER PEER) ---
+                else if (data.type === 'file-meta') {
+                    fileTransfers[senderId] = { meta: data, chunks: [], received: 0 };
+                    addSystemMsg(`Receiving ${data.name} from ${peerNames[senderId]}...`);
+                } 
+                else if (data.type === 'file-chunk') {
+                    const transfer = fileTransfers[senderId];
+                    if (!transfer) return;
+
+                    transfer.chunks.push(data.data);
+                    transfer.received += data.data.byteLength;
+                    
+                    if (transfer.received >= transfer.meta.size) {
+                        const blob = new Blob(transfer.chunks, { type: transfer.meta.fileType });
+                        const url = URL.createObjectURL(blob);
+                        
+                        if (transfer.meta.fileType.startsWith('image/')) {
+                            addMessage(`<img src="${url}">`, peerNames[senderId], 'theirs');
+                        } else {
+                            addMessage(`<div>📂 ${transfer.meta.name}</div><a href="${url}" download="${transfer.meta.name}" style="color: #00e676; display:block; margin-top:5px;">Download</a>`, peerNames[senderId], 'theirs');
+                        }
+                        delete fileTransfers[senderId]; // Cleanup
+                    }
+                }
+            });
+
+            conn.on('close', () => removePeer(conn.peer));
+            conn.on('error', () => removePeer(conn.peer));
+        }
+
+        function handleNewCall(call) {
+            if (localStream) call.answer(localStream);
+            call.on('stream', (remoteStream) => {
+                if (!document.getElementById('audio-' + call.peer)) {
+                    const audio = new Audio();
+                    audio.id = 'audio-' + call.peer;
+                    audio.srcObject = remoteStream;
+                    audio.autoplay = true;
+                    document.body.appendChild(audio);
+                }
             });
         }
 
-        // --- Chat UI & Actions ---
+        function removePeer(peerId) {
+            if (connections[peerId]) {
+                const name = peerNames[peerId] || "Someone";
+                addSystemMsg(`<b>${name}</b> disconnected.`);
+                playLeaveSound();
+                
+                delete connections[peerId];
+                delete peerNames[peerId];
+                delete fileTransfers[peerId];
+                
+                document.getElementById(`sidebar-${peerId}`)?.remove();
+                document.getElementById(`audio-${peerId}`)?.remove();
+            }
+            
+            if (Object.keys(connections).length === 0) {
+                searchingUI.style.display = 'flex';
+                statusText.innerText = isHost ? "Host Ready" : "Searching...";
+            }
+        }
+
+        // --- Broadcasting (Sending to EVERYONE) ---
+        function broadcastData(dataObj) {
+            Object.values(connections).forEach(conn => {
+                if (conn.open) conn.send(dataObj);
+            });
+        }
+
         sendBtn.onclick = () => {
             const text = msgInput.value;
-            if (!text || !chatConn || !chatConn.open) return;
+            if (!text || Object.keys(connections).length === 0) return;
             
-            chatConn.send({ type: 'text', value: text });
+            broadcastData({ type: 'text', value: text });
             addMessage(text, "You", 'mine');
             msgInput.value = "";
         };
@@ -330,11 +358,10 @@
 
         fileInput.onchange = async () => {
             const file = fileInput.files[0];
-            if (!file || !chatConn || !chatConn.open) return;
+            if (!file || Object.keys(connections).length === 0) return;
             
-            addSystemMsg(`Sending ${file.name}...`);
-            
-            chatConn.send({ type: 'file-meta', name: file.name, fileType: file.type, size: file.size });
+            addSystemMsg(`Sending ${file.name} to network...`);
+            broadcastData({ type: 'file-meta', name: file.name, fileType: file.type, size: file.size });
             
             const chunkSize = 16 * 1024; 
             let offset = 0;
@@ -343,11 +370,16 @@
                 const chunk = file.slice(offset, offset + chunkSize);
                 const buffer = await chunk.arrayBuffer();
                 
-                while (chatConn.dataChannel.bufferedAmount > 1024 * 1024) {
-                    await new Promise(r => setTimeout(r, 50));
+                // Throttle for WebRTC DataChannel limits
+                for (let conn of Object.values(connections)) {
+                    if (conn.open && conn.dataChannel) {
+                        while (conn.dataChannel.bufferedAmount > 1024 * 1024) {
+                            await new Promise(r => setTimeout(r, 50));
+                        }
+                    }
                 }
                 
-                chatConn.send({ type: 'file-chunk', data: buffer });
+                broadcastData({ type: 'file-chunk', data: buffer });
                 offset += chunkSize;
             }
             
@@ -360,14 +392,32 @@
             fileInput.value = ""; 
         };
 
+        // --- Ping Loop ---
+        setInterval(() => {
+            const now = Date.now();
+            broadcastData({ type: 'ping', time: now });
+        }, 2500); // Check latency every 2.5 seconds
+
+        function updatePingUI(peerId, latency) {
+            const pingEl = document.getElementById(`ping-${peerId}`);
+            if (pingEl) {
+                pingEl.innerText = `${latency}ms`;
+                pingEl.className = 'ping-display ' + (latency < 100 ? 'ping-good' : latency < 300 ? 'ping-med' : 'ping-bad');
+            }
+        }
+
+        // --- UI & Utility ---
+        function enableChat() {
+            msgInput.disabled = false;
+            sendBtn.disabled = false;
+        }
+
         muteBtn.onclick = () => {
             if (!localStream) return;
-            const audioTrack = localStream.getAudioTracks()[0];
             isMuted = !isMuted;
-            audioTrack.enabled = !isMuted;
+            localStream.getAudioTracks()[0].enabled = !isMuted;
             muteBtn.innerHTML = isMuted ? "🔇" : "🎤";
-            if (isMuted) muteBtn.classList.add('muted');
-            else muteBtn.classList.remove('muted');
+            muteBtn.classList.toggle('muted', isMuted);
         };
 
         document.getElementById('logout-btn').onclick = () => {
@@ -375,7 +425,6 @@
             location.reload(); 
         };
 
-        // --- UI Helpers ---
         function addMessage(content, user, type) {
             const div = document.createElement('div');
             div.className = `msg ${type}`;
@@ -392,10 +441,22 @@
         }
 
         function addUserToSidebar(name, id) {
+            if (document.getElementById(`sidebar-${id}`)) return; // Don't duplicate
+
             const div = document.createElement('div');
             div.className = 'user-item';
             div.id = `sidebar-${id}`;
-            div.innerHTML = `<div class="status-dot"></div> <span>${name}</span>`;
+            
+            // Local user doesn't get a ping display
+            const pingHtml = id === "me" ? `<span style="font-size:11px; color:#666;">Host</span>` : `<span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
+
+            div.innerHTML = `
+                <div class="user-left">
+                    <div class="status-dot"></div> 
+                    <span>${name}</span>
+                </div>
+                ${pingHtml}
+            `;
             userList.appendChild(div);
         }
     </script>
