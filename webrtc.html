@@ -108,7 +108,7 @@
         </div>
     </div>
 
-<script>
+    <script>
         // --- NATIVE WEB AUDIO SFX ---
         function playBeep(freq, type) {
             try {
@@ -152,11 +152,15 @@
         let isMuted = false;
         
         let screenStream = null;
-        let screenCalls = {}; // Keep track of outbound screenshare calls
+        let screenCalls = {}; 
 
         const connections = {}; 
         const peerNames = {};   
         const fileTransfers = {}; 
+        
+        // NEW: Network Stability Trackers
+        const pendingConnections = new Set();
+        const lastSeen = {};
 
         const peerConfig = {
             config: {
@@ -221,8 +225,7 @@
                     peer.on('connection', (conn) => handleNewConnection(conn));
                     peer.on('call', (call) => handleNewCall(call));
                     
-                    // NEW: Suppress "peer-unavailable" errors so the console doesn't 
-                    // spam while the guests are polling for a new host.
+                    // Suppress connection spam errors in the console
                     peer.on('error', (guestErr) => {
                         if (guestErr.type !== 'peer-unavailable') {
                             console.error("Guest PeerJS Error:", guestErr);
@@ -248,11 +251,17 @@
         }
 
         function connectToPeer(targetId) {
-            if (connections[targetId] || targetId === myId) return;
+            // NEW: Prevent connection spam by checking if we are already trying
+            if (connections[targetId] || pendingConnections.has(targetId) || targetId === myId) return;
+            
+            pendingConnections.add(targetId);
+            
+            // Allow retrying if the connection hangs for more than 4 seconds
+            setTimeout(() => { pendingConnections.delete(targetId); }, 4000);
+
             const conn = peer.connect(targetId);
             handleNewConnection(conn);
 
-            // Call them with Mic (Tagged as audio)
             if (localStream) {
                 const call = peer.call(targetId, localStream, { metadata: { type: 'audio' } });
                 handleNewCall(call);
@@ -261,6 +270,9 @@
 
         function handleNewConnection(conn) {
             const setupData = () => {
+                pendingConnections.delete(conn.peer); 
+                lastSeen[conn.peer] = Date.now(); 
+                
                 searchingUI.style.display = 'none';
                 connections[conn.peer] = conn;
                 
@@ -273,7 +285,6 @@
                     }
                 }
 
-                // If WE are already sharing our screen, force-call the new person with it!
                 if (screenStream) {
                     const screenCall = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' } });
                     screenCalls[conn.peer] = screenCall;
@@ -285,6 +296,9 @@
 
             conn.on('data', (data) => {
                 const senderId = conn.peer;
+                
+                // NEW: Every piece of data acts as a heartbeat
+                lastSeen[senderId] = Date.now(); 
 
                 if (data.type === 'name') {
                     peerNames[senderId] = data.value;
@@ -337,9 +351,8 @@
 
         // --- Handle Incoming Calls (Mic or Screen) ---
         function handleNewCall(call) {
-            // Check if it's a Screenshare
             if (call.metadata && call.metadata.type === 'screenshare') {
-                call.answer(); // Just accept, don't send anything back
+                call.answer(); 
                 call.on('stream', (remoteStream) => {
                     addVideoElement(call.peer, remoteStream, false);
                 });
@@ -349,7 +362,6 @@
                 return;
             }
 
-            // Otherwise, it's a standard Audio Call
             if (localStream) call.answer(localStream);
             else call.answer(); 
 
@@ -373,6 +385,8 @@
                 delete connections[peerId];
                 delete peerNames[peerId];
                 delete fileTransfers[peerId];
+                delete lastSeen[peerId]; 
+                pendingConnections.delete(peerId);
                 
                 document.getElementById(`sidebar-${peerId}`)?.remove();
                 document.getElementById(`audio-${peerId}`)?.remove();
@@ -383,7 +397,6 @@
                     delete screenCalls[peerId];
                 }
 
-                // NEW: If the missing peer is the Host, trigger the searching UI
                 if (peerId === ROOM_ID && !isHost) {
                     addSystemMsg("Host connection lost. Searching for a new host...");
                     searchingUI.style.display = 'flex';
@@ -407,12 +420,10 @@
                 screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
                 screenBtn.classList.add('active');
                 
-                addVideoElement('me', screenStream, true); // Show it locally
+                addVideoElement('me', screenStream, true); 
 
-                // Handle the native browser "Stop Sharing" button
                 screenStream.getVideoTracks()[0].onended = stopScreenShare;
 
-                // Fire off a new call to everyone with the screen
                 Object.keys(connections).forEach(peerId => {
                     const call = peer.call(peerId, screenStream, { metadata: { type: 'screenshare' } });
                     screenCalls[peerId] = call;
@@ -441,7 +452,7 @@
             video.className = 'screen-video';
             video.srcObject = stream;
             video.autoplay = true;
-            if (isLocal) video.muted = true; // Don't echo our own system audio
+            if (isLocal) video.muted = true; 
             videoGrid.appendChild(video);
         }
 
@@ -496,18 +507,31 @@
             fileInput.value = ""; 
         };
 
-        // --- Mesh Sync & Ping Loop ---
+        // --- NEW: Mesh Sync & Ping Timeout Loop ---
         setInterval(() => {
+            const now = Date.now();
+
+            // 1. TIMEOUT CHECK: Drop any peer that hasn't communicated in 10 seconds
+            Object.keys(connections).forEach(peerId => {
+                if (now - (lastSeen[peerId] || now) > 10000) {
+                    console.warn(`Connection to ${peerId} timed out.`);
+                    removePeer(peerId);
+                }
+            });
+
+            // 2. SYNC & HEALING
             if (isHost) {
                 const activePeers = Object.keys(connections);
                 if (activePeers.length > 0) broadcastData({ type: 'mesh-sync', peers: activePeers });
             } else {
-                // NEW: If I am a guest and the host is missing, continuously search for a new one
+                // If Host is disconnected, search for them gracefully
                 if (!connections[ROOM_ID]) {
                     connectToPeer(ROOM_ID);
                 }
             }
-            broadcastData({ type: 'ping', time: Date.now() });
+            
+            // 3. HEARTBEAT
+            broadcastData({ type: 'ping', time: now });
         }, 3000); 
 
         function updatePingUI(peerId, latency) {
