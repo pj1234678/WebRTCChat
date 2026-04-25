@@ -9,7 +9,7 @@
         body { font-family: -apple-system, sans-serif; background: #121212; color: white; display: flex; height: 100vh; margin: 0; overflow: hidden; }
         
         /* Sidebar (Login & Users) */
-        .sidebar { width: 280px; background: #1e1e1e; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 20px; position: relative; }
+        .sidebar { width: 320px; background: #1e1e1e; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 20px; position: relative; }
         .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; }
 
         /* Login Section */
@@ -48,13 +48,61 @@
         .file-label { cursor: pointer; font-size: 20px; padding: 10px; color: #888; }
         .file-label:hover { color: white; }
         
-        /* User List & Volume Slider */
+        /* User List */
         .user-item { padding: 10px; background: #252525; margin-bottom: 5px; border-radius: 5px; font-size: 14px; display: flex; align-items: center; justify-content: space-between; }
         .user-left { display: flex; align-items: center; gap: 10px; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;}
         .status-dot { width: 8px; height: 8px; background: #00e676; border-radius: 50%; flex-shrink: 0; }
         
-        .vol-slider { width: 50px; height: 4px; -webkit-appearance: none; background: #444; border-radius: 2px; outline: none; cursor: pointer; }
-        .vol-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 10px; height: 10px; border-radius: 50%; background: #00e676; }
+        /* Redesigned Volume Slider */
+        .vol-slider { 
+            -webkit-appearance: none; 
+            appearance: none;
+            width: 70px; 
+            height: 6px; 
+            background: #333; 
+            border-radius: 5px; 
+            outline: none; 
+            cursor: pointer; 
+            transition: background 0.2s ease;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
+        }
+        
+        .vol-slider:hover { background: #444; }
+
+        /* WebKit/Blink (Chrome, Safari, Edge) */
+        .vol-slider::-webkit-slider-thumb { 
+            -webkit-appearance: none; 
+            appearance: none;
+            width: 14px; 
+            height: 14px; 
+            border-radius: 50%; 
+            background: #00e676; 
+            cursor: pointer; 
+            transition: transform 0.1s ease, box-shadow 0.1s ease;
+            box-shadow: 0 0 5px rgba(0, 230, 118, 0.4);
+        }
+        
+        .vol-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.25);
+            box-shadow: 0 0 8px rgba(0, 230, 118, 0.8);
+        }
+
+        /* Mozilla Firefox */
+        .vol-slider::-moz-range-thumb {
+            width: 14px; 
+            height: 14px; 
+            border: none;
+            border-radius: 50%; 
+            background: #00e676; 
+            cursor: pointer; 
+            transition: transform 0.1s ease, box-shadow 0.1s ease;
+            box-shadow: 0 0 5px rgba(0, 230, 118, 0.4);
+        }
+
+        .vol-slider::-moz-range-thumb:hover {
+            transform: scale(1.25);
+            box-shadow: 0 0 8px rgba(0, 230, 118, 0.8);
+        }
         
         .ping-display { font-size: 11px; color: #888; background: #111; padding: 2px 6px; border-radius: 4px; font-family: monospace; white-space: nowrap; }
         .ping-good { color: #00e676; }
@@ -597,7 +645,10 @@
             } else {
                 // Every other user gets a volume slider and ping display
                 rightSideHtml = `
-                    <input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1" title="Adjust Volume">
+                    <div style="display: flex; align-items: center; gap: 4px; margin-right: 8px;">
+                        <span style="font-size: 12px; opacity: 0.7;" title="Volume">🔊</span>
+                        <input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1" title="Adjust Volume">
+                    </div>
                     <span id="ping-${id}" class="ping-display ping-med">-- ms</span>
                 `;
             }
