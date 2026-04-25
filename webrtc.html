@@ -23,7 +23,7 @@
         .sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
         #logout-btn { background: #d32f2f; color: white; padding: 8px; width: 100%; font-size: 13px; border-radius: 8px; cursor: pointer; border: none; }
 
-        /* Video Grid (NEW) */
+        /* Video Grid */
         #video-grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 20px 20px 0 20px; overflow-y: auto; max-height: 40vh; }
         .screen-video { max-height: 300px; flex: 1 1 300px; background: #000; border-radius: 8px; object-fit: contain; width: 100%; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
 
@@ -221,6 +221,14 @@
                     peer.on('connection', (conn) => handleNewConnection(conn));
                     peer.on('call', (call) => handleNewCall(call));
                     
+                    // NEW: Suppress "peer-unavailable" errors so the console doesn't 
+                    // spam while the guests are polling for a new host.
+                    peer.on('error', (guestErr) => {
+                        if (guestErr.type !== 'peer-unavailable') {
+                            console.error("Guest PeerJS Error:", guestErr);
+                        }
+                    });
+                    
                     peer.on('open', (id) => {
                         myId = id;
                         isHost = false;
@@ -233,7 +241,7 @@
                         connectToPeer(ROOM_ID); 
                         enableChat();
                     });
-                } else {
+                } else if (err.type !== 'peer-unavailable') {
                     console.error("PeerJS Error:", err);
                 }
             });
@@ -374,6 +382,14 @@
                     screenCalls[peerId].close();
                     delete screenCalls[peerId];
                 }
+
+                // NEW: If the missing peer is the Host, trigger the searching UI
+                if (peerId === ROOM_ID && !isHost) {
+                    addSystemMsg("Host connection lost. Searching for a new host...");
+                    searchingUI.style.display = 'flex';
+                    statusText.innerText = "Searching for Host...";
+                    statusText.style.color = "#ffeb3b";
+                }
             }
             if (Object.keys(connections).length === 0) {
                 searchingUI.style.display = 'flex';
@@ -485,6 +501,11 @@
             if (isHost) {
                 const activePeers = Object.keys(connections);
                 if (activePeers.length > 0) broadcastData({ type: 'mesh-sync', peers: activePeers });
+            } else {
+                // NEW: If I am a guest and the host is missing, continuously search for a new one
+                if (!connections[ROOM_ID]) {
+                    connectToPeer(ROOM_ID);
+                }
             }
             broadcastData({ type: 'ping', time: Date.now() });
         }, 3000); 
