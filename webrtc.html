@@ -38,7 +38,6 @@
         /* Chat Thumbnail & Video Styling */
         .msg img, .msg video { max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
         .msg video { background: #000; outline: none; }
-        .msg img:hover { transform: scale(1.02); box-shadow: 0 6px 16px rgba(0,0,0,0.3); cursor: pointer; }
         
         .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
         .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
@@ -75,26 +74,11 @@
         .radar::after { content: ''; position: absolute; inset: 50%; transform: translate(-50%,-50%); width: 12px; height: 12px; background: #fff; border-radius: 50%; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,0.7); } 70% { box-shadow: 0 0 0 20px rgba(255,255,255,0); } 100% { box-shadow: 0 0 0 0 transparent; } }
 
-        /* Fullscreen Image Lightbox */
-        #image-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 9999; align-items: center; justify-content: center; flex-direction: column; }
-        #close-modal { position: absolute; top: 25px; right: 40px; color: #fff; font-size: 40px; cursor: pointer; transition: 0.2s; line-height: 1; font-weight: 300; }
-        #close-modal:hover { color: #da373c; transform: scale(1.1); }
-        #modal-img { max-width: 90%; max-height: 75vh; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); object-fit: contain; }
-        .download-btn { margin-top: 25px; padding: 12px 28px; background: #23a559; color: #fff; text-decoration: none; border-radius: 10px; font-weight: 600; font-size: 15px; transition: 0.2s; font-family: 'Inter', sans-serif; display: inline-flex; align-items: center; gap: 8px; }
-        .download-btn:hover { background: #1c8547; transform: translateY(-1px); }
-        .download-btn:active { transform: scale(0.98); }
-
         /* Drag & Drop Overlay */
         #drop-overlay { display: none; position: absolute; inset: 0; background: rgba(26, 115, 232, 0.15); border: 3px dashed #1a73e8; z-index: 1000; align-items: center; justify-content: center; flex-direction: column; color: #1a73e8; font-size: 20px; font-weight: 600; pointer-events: none; backdrop-filter: blur(3px); margin: 15px; border-radius: 16px; }
     </style>
 </head>
 <body>
-    <div id="image-modal">
-        <span id="close-modal">&times;</span>
-        <img id="modal-img" src="">
-        <a id="modal-download" href="#" class="download-btn" download="shared-image.png">⬇️ Download Image</a>
-    </div>
-
     <div id="login-screen">
         <h1>🚀 Super Mesh Chat</h1>
         <p style="color:#949ba4; margin-top: 0; margin-bottom: 25px; font-weight: 500;">Multi-User Conference Room</p>
@@ -162,21 +146,6 @@
         let amITyping = false;
         let typingTimeout = null;
         const typingUsers = new Set();
-
-        // Image Viewer Lightbox Logic
-        const imageModal = $('image-modal');
-        const modalImg = $('modal-img');
-        const modalDownload = $('modal-download');
-        
-        $('close-modal').onclick = () => imageModal.style.display = 'none';
-        imageModal.onclick = (e) => { if(e.target === imageModal) imageModal.style.display = 'none'; };
-        
-        function openImageViewer(src, filename) {
-            modalImg.src = src;
-            modalDownload.href = src;
-            modalDownload.download = filename || "shared-image.png";
-            imageModal.style.display = 'flex';
-        }
 
         const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
         $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
@@ -259,7 +228,7 @@
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
                         
                         if (tr.meta.fileType.startsWith('image/')) {
-                            addMessage(`<img src="${url}" data-filename="${tr.meta.name}">`, peerNames[sid], 'theirs');
+                            addMessage(`<img src="${url}"><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Photo</a>`, peerNames[sid], 'theirs');
                         } else if (tr.meta.fileType.startsWith('video/')) {
                             addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, peerNames[sid], 'theirs');
                         } else {
@@ -444,7 +413,7 @@
             
             const url = URL.createObjectURL(file);
             if (file.type.startsWith('image/')) {
-                addMessage(`<img src="${url}" data-filename="${filename}">`, "You", 'mine');
+                addMessage(`<img src="${url}"><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Photo</a>`, "You", 'mine');
             } else if (file.type.startsWith('video/')) {
                 addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, "You", 'mine');
             } else {
@@ -522,7 +491,7 @@
         $('mute-btn').onclick = () => { if(!localStream) return; isMuted = !isMuted; localStream.getAudioTracks()[0].enabled = !isMuted; $('mute-btn').innerHTML = isMuted?"🔇":"🎤"; $('mute-btn').classList.toggle('active', isMuted); };
         $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
 
-        // --- Improved Add Message (with Image Binding & Robust Auto-scroll) ---
+        // --- Improved Add Message (with Robust Auto-scroll) ---
         function addMessage(html, user, type) { 
             const d = document.createElement('div'); 
             d.className = `msg ${type}`; 
@@ -532,10 +501,9 @@
             const scrollToBottom = () => $('messages').scrollTop = $('messages').scrollHeight;
             scrollToBottom(); 
 
-            const imgs = d.querySelectorAll('img');
-            imgs.forEach(img => {
-                img.onload = scrollToBottom; 
-                img.onclick = () => openImageViewer(img.src, img.getAttribute('data-filename'));
+            const medias = d.querySelectorAll('img, video');
+            medias.forEach(m => {
+                m.onload = m.onloadedmetadata = scrollToBottom; 
             });
         }
         
