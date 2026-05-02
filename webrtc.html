@@ -29,18 +29,15 @@
 
         /* Chat Area */
         #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
-        
-        /* FIX ADDED HERE: Added overflow-wrap and word-break to contain long text */
         .msg { max-width: 70%; padding: 10px 15px; border-radius: 15px; font-size: 15px; line-height: 1.4; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }
         .msg.mine { align-self: flex-end; background: #00e676; color: black; border-bottom-right-radius: 2px; }
         .msg.theirs { align-self: flex-start; background: #333; border-bottom-left-radius: 2px; }
         .msg img { max-width: 100%; border-radius: 8px; margin-top: 5px; cursor: pointer; }
         .msg-info { font-size: 11px; opacity: 0.7; margin-bottom: 2px; }
 
-        /* FIX ADDED HERE: Styles to make links wrap properly and look good */
         .msg a { word-break: break-all; text-decoration: underline; }
-        .msg.mine a { color: #004d40; } /* Dark green link on light green bubble */
-        .msg.theirs a { color: #00e676; } /* Light green link on dark bubble */
+        .msg.mine a { color: #004d40; } 
+        .msg.theirs a { color: #00e676; } 
 
         /* Input Area */
         .input-bar { padding: 15px; background: #1e1e1e; display: flex; gap: 10px; border-top: 1px solid #333; align-items: center; }
@@ -218,7 +215,7 @@
         usernameInput.addEventListener('keypress', triggerLoginOnEnter);
         roomPassInput.addEventListener('keypress', triggerLoginOnEnter);
 
-        // --- Text Formatting Helpers (Added to fix links and prevent XSS) ---
+        // --- Text Formatting Helpers ---
         function escapeHTML(str) {
             return str.replace(/[&<>'"]/g, tag => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
@@ -228,7 +225,6 @@
         function linkify(text) {
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             return text.replace(urlRegex, function(url) {
-                // target="_blank" opens in a new tab so it doesn't drop the WebRTC connection!
                 return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
             });
         }
@@ -283,7 +279,6 @@
                     peer.on('connection', (conn) => handleNewConnection(conn));
                     peer.on('call', (call) => handleNewCall(call));
                     
-                    // Suppress connection spam errors in the console
                     peer.on('error', (guestErr) => {
                         if (guestErr.type !== 'peer-unavailable') {
                             console.error("Guest PeerJS Error:", guestErr);
@@ -309,12 +304,9 @@
         }
 
         function connectToPeer(targetId) {
-            // Prevent connection spam by checking if we are already trying
             if (connections[targetId] || pendingConnections.has(targetId) || targetId === myId) return;
             
             pendingConnections.add(targetId);
-            
-            // Allow retrying if the connection hangs for more than 4 seconds
             setTimeout(() => { pendingConnections.delete(targetId); }, 4000);
 
             const conn = peer.connect(targetId);
@@ -333,6 +325,13 @@
                 
                 searchingUI.style.display = 'none';
                 connections[conn.peer] = conn;
+
+                // --- FIX ADDED HERE ---
+                // If we are a guest and we just reconnected to the host, update the visual text
+                if (!isHost && conn.peer === ROOM_ID) {
+                    statusText.innerText = "Connected to Mesh";
+                    statusText.style.color = "#00e676";
+                }
                 
                 conn.send({ type: 'name', value: myName });
 
@@ -355,7 +354,6 @@
             conn.on('data', (data) => {
                 const senderId = conn.peer;
                 
-                // Every piece of data acts as a heartbeat
                 lastSeen[senderId] = Date.now(); 
 
                 if (data.type === 'name') {
@@ -370,7 +368,6 @@
                     });
                 } 
                 else if (data.type === 'text') {
-                    // FIX: Process incoming text for links
                     const safeText = linkify(escapeHTML(data.value));
                     addMessage(safeText, peerNames[senderId] || "Unknown", 'theirs');
                 } 
@@ -433,7 +430,6 @@
                     audio.autoplay = true;
                     document.body.appendChild(audio);
 
-                    // Sync the audio element volume with the current sidebar slider value
                     const volSlider = document.getElementById(`vol-${call.peer}`);
                     if(volSlider) {
                         audio.volume = volSlider.value;
@@ -533,10 +529,8 @@
             const text = msgInput.value;
             if (!text || Object.keys(connections).length === 0) return;
             
-            // Broadcast raw text to network
             broadcastData({ type: 'text', value: text });
             
-            // FIX: Process local text to catch links and render them 
             const safeText = linkify(escapeHTML(text));
             addMessage(safeText, "You", 'mine');
             msgInput.value = "";
@@ -581,7 +575,6 @@
         setInterval(() => {
             const now = Date.now();
 
-            // 1. TIMEOUT CHECK: Drop any peer that hasn't communicated in 10 seconds
             Object.keys(connections).forEach(peerId => {
                 if (now - (lastSeen[peerId] || now) > 10000) {
                     console.warn(`Connection to ${peerId} timed out.`);
@@ -589,18 +582,15 @@
                 }
             });
 
-            // 2. SYNC & HEALING
             if (isHost) {
                 const activePeers = Object.keys(connections);
                 if (activePeers.length > 0) broadcastData({ type: 'mesh-sync', peers: activePeers });
             } else {
-                // If Host is disconnected, search for them gracefully
                 if (!connections[ROOM_ID]) {
                     connectToPeer(ROOM_ID);
                 }
             }
             
-            // 3. HEARTBEAT
             broadcastData({ type: 'ping', time: now });
         }, 3000); 
 
@@ -658,9 +648,7 @@
 
             if (id === "me") {
                 displayName += " (You)";
-                // Badges completely removed visually for the local user 
             } else {
-                // Every other user gets a volume slider and ping display
                 rightSideHtml = `
                     <div style="display: flex; align-items: center; gap: 4px; margin-right: 8px;">
                         <span style="font-size: 12px; opacity: 0.7;" title="Volume">🔊</span>
@@ -681,7 +669,6 @@
             `;
             userList.appendChild(div);
 
-            // Bind the volume slider to the specific user's audio element
             if (id !== "me") {
                 const volSlider = document.getElementById(`vol-${id}`);
                 volSlider.addEventListener('input', (e) => {
