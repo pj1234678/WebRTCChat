@@ -150,9 +150,9 @@
         const playBeep = (freq, type) => { try { const ctx=new(window.AudioContext||window.webkitAudioContext)(),osc=ctx.createOscillator(),g=ctx.createGain();osc.type=type;osc.frequency.value=freq;g.gain.setValueAtTime(0.05,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.connect(g);g.connect(ctx.destination);osc.start();osc.stop(ctx.currentTime+0.3); } catch(e){} };
         const playJoinSound = () => playBeep(880, 'sine'), playLeaveSound = () => playBeep(440, 'triangle'); 
 
-        let myName = "", myId = "", isHost = false, peer, ROOM_ID = "", localStream = null, isMuted = false;
+        let myName = "", myFlag = "🌐 ", myId = "", isHost = false, peer, ROOM_ID = "", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
-        const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {};
+        const connections = {}, peerNames = {}, peerFlags = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
         // Soundboard & Typing globals
@@ -177,6 +177,20 @@
             imageModal.style.display = 'flex';
         }
 
+        // Fetch User Location Flag
+        async function fetchMyFlag() {
+            try {
+                const controller = new AbortController();
+                setTimeout(() => controller.abort(), 2000); // 2s timeout so login isn't delayed
+                const res = await fetch('https://get.geojs.io/v1/ip/geo.json', { signal: controller.signal });
+                const data = await res.json();
+                if (data.country) {
+                    // Convert Alpha-2 code (e.g. "US") to Emoji Flag
+                    myFlag = data.country.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397)) + " ";
+                }
+            } catch(e) { myFlag = "🌐 "; }
+        }
+
         const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
         $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
         const escapeHTML = s => s.replace(/[&<>'"]/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[t]));
@@ -186,10 +200,14 @@
             myName = $('username').value.trim() || "Anon";
             if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
             ROOM_ID = "superconf-mesh-secretpassword";
-            try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); } 
-            catch(err) { $('mute-btn').style.display = 'none'; }
             
             $('login-screen').style.display = 'none'; $('conn-status').innerText = "Initializing...";
+            
+            // Get Country Flag
+            await fetchMyFlag();
+
+            try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); } 
+            catch(err) { $('mute-btn').style.display = 'none'; }
             
             $('room-clock').style.display = 'inline-block';
             const tickClock = () => { $('room-clock').innerText = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
@@ -205,7 +223,7 @@
             peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
             peer.on('open', id => {
                 myId = id; isHost = true; $('conn-status').innerText = "Host Ready"; $('conn-status').style.color = "#23a559";
-                addSystemMsg(`You created the room as <b>${myName}</b>`); addUserToSidebar(myName, "me"); enableChat();
+                addSystemMsg(`You created the room as <b>${myFlag}${myName}</b>`); addUserToSidebar(myName, "me", myFlag); enableChat();
             });
             peer.on('error', err => {
                 if (err.type === 'unavailable-id') {
@@ -213,7 +231,7 @@
                     peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
                     peer.on('open', id => {
                         myId = id; isHost = false; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
-                        addSystemMsg(`You joined as <b>${myName}</b>`); addUserToSidebar(myName, "me"); connectToPeer(ROOM_ID); enableChat();
+                        addSystemMsg(`You joined as <b>${myFlag}${myName}</b>`); addUserToSidebar(myName, "me", myFlag); connectToPeer(ROOM_ID); enableChat();
                     });
                 }
             });
@@ -231,7 +249,10 @@
                 pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
                 $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
                 if (!isHost && conn.peer === ROOM_ID) { $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559"; }
-                conn.send({ type: 'name', value: myName });
+                
+                // Transmit name AND flag
+                conn.send({ type: 'name', value: myName, flag: myFlag });
+                
                 if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
                 if (screenStream) screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' } });
                 if (camStream) camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' } });
@@ -239,25 +260,32 @@
             conn.open ? setup() : conn.on('open', setup);
             conn.on('data', data => {
                 const sid = conn.peer; lastSeen[sid] = Date.now();
-                if (data.type === 'name') { peerNames[sid] = data.value; addUserToSidebar(data.value, sid); addSystemMsg(`<b>${data.value}</b> joined.`); playJoinSound(); }
+                if (data.type === 'name') { 
+                    peerNames[sid] = data.value; 
+                    peerFlags[sid] = data.flag || "🌐 "; 
+                    addUserToSidebar(data.value, sid, peerFlags[sid]); 
+                    addSystemMsg(`<b>${peerFlags[sid]}${data.value}</b> joined.`); 
+                    playJoinSound(); 
+                }
                 else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
-                else if (data.type === 'text') addMessage(linkify(escapeHTML(data.value)), peerNames[sid] || "Unknown", 'theirs');
+                else if (data.type === 'text') addMessage(linkify(escapeHTML(data.value)), (peerFlags[sid] || "") + (peerNames[sid] || "Unknown"), 'theirs');
                 else if (data.type === 'typing') { 
-                    const uname = peerNames[sid] || "Someone"; 
-                    data.state ? typingUsers.add(uname) : typingUsers.delete(uname); 
+                    const fullName = (peerFlags[sid] || "") + (peerNames[sid] || "Someone"); 
+                    data.state ? typingUsers.add(fullName) : typingUsers.delete(fullName); 
                     updateTypingUI(); 
                 }
                 else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
                 else if (data.type === 'pong') updatePingUI(sid, Date.now() - data.time);
-                else if (data.type === 'play-sound') { playCustomSound(data.buffer, data.mime); addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`); }
+                else if (data.type === 'play-sound') { playCustomSound(data.buffer, data.mime); addSystemMsg(`🎵 <b>${peerFlags[sid]||""}${peerNames[sid] || "Someone"}</b> played a sound.`); }
                 else if (data.type === 'file-meta') { fileTransfers[sid] = { meta: data, chunks: [], received: 0 }; }
                 else if (data.type === 'file-chunk') {
                     const tr = fileTransfers[sid]; if(!tr) return;
                     tr.chunks.push(data.data); tr.received += data.data.byteLength;
                     if (tr.received >= tr.meta.size) {
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
-                        if(tr.meta.fileType.startsWith('image/')) addMessage(`<img src="${url}" data-filename="${tr.meta.name}">`, peerNames[sid], 'theirs');
-                        else addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:block; margin-top:8px;">Download</a>`, peerNames[sid], 'theirs');
+                        const senderName = (peerFlags[sid] || "") + (peerNames[sid] || "Unknown");
+                        if(tr.meta.fileType.startsWith('image/')) addMessage(`<img src="${url}" data-filename="${tr.meta.name}">`, senderName, 'theirs');
+                        else addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:block; margin-top:8px;">Download</a>`, senderName, 'theirs');
                         delete fileTransfers[sid];
                     }
                 }
@@ -286,15 +314,16 @@
         function removePeer(id) {
             if (!connections[id]) return;
             const uname = peerNames[id] || "Someone";
-            addSystemMsg(`<b>${uname}</b> left.`); playLeaveSound();
+            const flag = peerFlags[id] || "";
+            addSystemMsg(`<b>${flag}${uname}</b> left.`); playLeaveSound();
             
-            if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
+            if (typingUsers.has(flag + uname)) { typingUsers.delete(flag + uname); updateTypingUI(); }
 
             ['', '-cam'].forEach(ext => { $(`video-${id}${ext}`)?.remove(); });
             if (screenCalls[id]) { screenCalls[id].close(); delete screenCalls[id]; }
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
             $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
-            delete connections[id]; delete peerNames[id]; delete fileTransfers[id]; delete lastSeen[id]; pendingConnections.delete(id);
+            delete connections[id]; delete peerNames[id]; delete peerFlags[id]; delete fileTransfers[id]; delete lastSeen[id]; pendingConnections.delete(id);
             if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
             if (!Object.keys(connections).length) $('searching-container').style.display = 'flex';
         }
@@ -348,7 +377,7 @@
             if (amITyping) { amITyping = false; clearTimeout(typingTimeout); bcast({ type: 'typing', state: false }); }
             
             bcast({type:'text',value:t}); 
-            addMessage(linkify(escapeHTML(t)), "You", 'mine'); 
+            addMessage(linkify(escapeHTML(t)), myFlag + "You", 'mine'); 
             $('msg-input').value = ""; 
         };
         $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
@@ -406,17 +435,15 @@
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                 const file = e.dataTransfer.files[0];
                 
-                // If audio, play instantly to chat
                 if (file.type.startsWith('audio/')) {
                     addSystemMsg(`Playing <b>${file.name}</b> to the room...`);
                     const buffer = await file.arrayBuffer();
                     playCustomSound(buffer, file.type);
                     if (Object.keys(connections).length > 0) {
-                        addMessage(`<i>Played dropped sound: ${file.name}</i>`, "You", 'mine');
+                        addMessage(`<i>Played dropped sound: ${file.name}</i>`, myFlag + "You", 'mine');
                         bcast({ type: 'play-sound', buffer: buffer, mime: file.type });
                     }
                 } else {
-                    // Else, send as shared file or photo
                     sendFile(file);
                 }
             }
@@ -436,7 +463,7 @@
             }
             
             const url = URL.createObjectURL(file);
-            file.type.startsWith('image/') ? addMessage(`<img src="${url}" data-filename="${filename}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${filename}</div>`, "You", 'mine');
+            file.type.startsWith('image/') ? addMessage(`<img src="${url}" data-filename="${filename}">`, myFlag + "You", 'mine') : addMessage(`<div>📂 Shared: ${filename}</div>`, myFlag + "You", 'mine');
         }
 
         $('file-input').onchange = () => {
@@ -479,7 +506,7 @@
             if (soundboard[num]) {
                 playCustomSound(soundboard[num].buffer, soundboard[num].mime);
                 if (Object.keys(connections).length > 0) {
-                    addMessage(`<i>Played a sound...</i>`, "You", 'mine');
+                    addMessage(`<i>Played a sound...</i>`, myFlag + "You", 'mine');
                     bcast({ type: 'play-sound', buffer: soundboard[num].buffer, mime: soundboard[num].mime });
                 }
             }
@@ -533,11 +560,11 @@
             $('messages').scrollTop = $('messages').scrollHeight;
         }
 
-        function addUserToSidebar(name, id) {
-            if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
+        function addUserToSidebar(name, id, flag = "🌐 ") {
+            if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = flag + name + (id==="me"?" (You)":""); return; }
             const d = document.createElement('div'); d.className = 'user-item'; d.id = `sidebar-${id}`;
             const right = id === "me" ? '' : `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span style="font-size:14px;opacity:0.8">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
-            d.innerHTML = `<div class="user-left"><div class="status-dot"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
+            d.innerHTML = `<div class="user-left"><div class="status-dot"></div><span id="name-${id}" title="${flag}${name}${id==="me"?" (You)":""}">${flag}${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
             $('user-list').appendChild(d);
             if (id !== "me") $(`vol-${id}`).addEventListener('input', e => { const a = $(`audio-${id}`); if(a) a.volume = e.target.value; });
         }
