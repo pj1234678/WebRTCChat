@@ -101,12 +101,12 @@
             <button id="screen-btn" class="media-btn" title="Share Screen">🖥️</button>
             
             <input type="file" id="soundboard-input" accept="audio/*" style="display: none;">
-            <label for="soundboard-input" class="media-btn highlight-hover" title="Bind Sound to Numpad">🎵</label>
+            <label for="soundboard-input" class="media-btn highlight-hover" title="Soundboard">🎵</label>
             
             <input type="file" id="file-input" style="display: none;">
             <label for="file-input" class="media-btn highlight-hover" title="Send File/Photo">📎</label>
             
-            <input type="text" id="msg-input" placeholder="Type a message..." disabled>
+            <input type="text" id="msg-input" placeholder="Type a message (or Paste an image)..." disabled>
             <button id="send-btn" disabled>Send</button>
         </div>
     </div>
@@ -283,26 +283,43 @@
         $('send-btn').onclick = () => { const t = $('msg-input').value; if(!t||!Object.keys(connections).length) return; bcast({type:'text',value:t}); addMessage(linkify(escapeHTML(t)), "You", 'mine'); $('msg-input').value = ""; };
         $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
 
-        $('file-input').onchange = async () => {
-            const file = $('file-input').files[0]; if (!file || !Object.keys(connections).length) return;
-            addSystemMsg(`Sending ${file.name}...`); bcast({ type: 'file-meta', name: file.name, fileType: file.type, size: file.size });
+        // --- File Sharing Logic (Refactored to support pasting) ---
+        async function sendFile(file) {
+            if (!file || !Object.keys(connections).length) return;
+            addSystemMsg(`Sending ${file.name || 'file'}...`); 
+            bcast({ type: 'file-meta', name: file.name || 'pasted-image.png', fileType: file.type, size: file.size });
+            
             let offset = 0;
             while (offset < file.size) {
                 const chunk = file.slice(offset, offset + 16384), buffer = await chunk.arrayBuffer();
                 for (let c of Object.values(connections)) if (c.open && c.dataChannel) while (c.dataChannel.bufferedAmount > 1048576) await new Promise(r => setTimeout(r, 50));
                 bcast({ type: 'file-chunk', data: buffer }); offset += 16384;
             }
+            
             const url = URL.createObjectURL(file);
-            file.type.startsWith('image/') ? addMessage(`<img src="${url}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${file.name}</div>`, "You", 'mine');
+            file.type.startsWith('image/') ? addMessage(`<img src="${url}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${file.name || 'file'}</div>`, "You", 'mine');
+        }
+
+        $('file-input').onchange = () => {
+            sendFile($('file-input').files[0]);
             $('file-input').value = "";
         };
+
+        document.addEventListener('paste', (e) => {
+            if (e.clipboardData && e.clipboardData.files.length > 0) {
+                const file = e.clipboardData.files[0];
+                if (file.type.startsWith('image/')) {
+                    // Re-wrap pasted file to give it a generic default name
+                    const pastedFile = new File([file], `Pasted Image - ${new Date().toLocaleTimeString()}.png`, { type: file.type });
+                    sendFile(pastedFile);
+                }
+            }
+        });
 
         // --- Soundboard Logic ---
         $('soundboard-input').onchange = async (e) => {
             const file = e.target.files[0];
             if (!file) return;
-            // Cap at 500KB to ensure smooth real-time playing without data channel clogging
-            if (file.size > 500 * 1024) return alert("For instant real-time playback, please keep sound files under 500KB.");
             
             waitingForKeyBind = { buffer: await file.arrayBuffer(), mime: file.type, name: file.name };
             addSystemMsg(`Press a <b>Numpad key (0-9)</b> to bind the sound <b>${file.name}</b>...`);
@@ -310,7 +327,6 @@
         };
 
         document.addEventListener('keydown', (e) => {
-            // Strictly check for Numpad keys (Numpad0 to Numpad9)
             const match = e.code.match(/^Numpad(\d)$/);
             if (!match) return;
             const num = match[1];
