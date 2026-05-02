@@ -8,7 +8,7 @@
     <style>
         body { font-family: 'Inter', sans-serif; background: #111214; color: #f2f3f5; display: flex; height: 100vh; margin: 0; overflow: hidden; }
         .sidebar { width: 320px; background: #1e1f22; border-right: 1px solid #2b2d31; display: flex; flex-direction: column; padding: 20px; position: relative; }
-        .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; background: #111214; }
+        .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; background: #111214; position: relative; }
         
         #login-screen { position: absolute; inset: 0; background: rgba(17,18,20,0.95); backdrop-filter: blur(10px); z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; }
         #login-screen h1 { font-weight: 600; margin-bottom: 5px; }
@@ -39,6 +39,10 @@
         .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
         .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
         .msg a { color: inherit; font-weight: 500; }
+
+        /* Typing Indicator Styling */
+        #typing-indicator { font-size: 13px; color: #949ba4; font-style: italic; padding: 0 25px 10px 25px; min-height: 20px; opacity: 0; transition: opacity 0.3s ease; font-weight: 500; }
+        #typing-indicator.active { opacity: 1; }
 
         .input-bar { padding: 15px 20px; background: #1e1f22; display: flex; gap: 12px; border-top: 1px solid #2b2d31; align-items: center; }
         #msg-input { flex: 1; font-family: 'Inter', sans-serif; font-size: 15px; padding: 0 20px; height: 46px; border-radius: 24px; border: 1px solid #383a40; background: #2b2d31; color: #dbdee1; outline: none; transition: 0.2s; }
@@ -111,6 +115,9 @@
     <div class="main-area">
         <div id="video-grid"></div>
         <div id="messages"></div>
+        
+        <div id="typing-indicator"></div>
+        
         <div class="input-bar">
             <button id="mute-btn" class="media-btn" title="Toggle Mic">🎤</button>
             <button id="cam-btn" class="media-btn" title="Toggle Webcam">📷</button>
@@ -137,9 +144,12 @@
         const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
-        // Soundboard globals
+        // Soundboard & Typing globals
         const soundboard = {};
         let waitingForKeyBind = null;
+        let amITyping = false;
+        let typingTimeout = null;
+        const typingUsers = new Set();
 
         // Image Viewer Lightbox Logic
         const imageModal = $('image-modal');
@@ -221,6 +231,11 @@
                 if (data.type === 'name') { peerNames[sid] = data.value; addUserToSidebar(data.value, sid); addSystemMsg(`<b>${data.value}</b> joined.`); playJoinSound(); }
                 else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
                 else if (data.type === 'text') addMessage(linkify(escapeHTML(data.value)), peerNames[sid] || "Unknown", 'theirs');
+                else if (data.type === 'typing') { 
+                    const uname = peerNames[sid] || "Someone"; 
+                    data.state ? typingUsers.add(uname) : typingUsers.delete(uname); 
+                    updateTypingUI(); 
+                }
                 else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
                 else if (data.type === 'pong') updatePingUI(sid, Date.now() - data.time);
                 else if (data.type === 'play-sound') { playCustomSound(data.buffer, data.mime); addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`); }
@@ -259,7 +274,12 @@
 
         function removePeer(id) {
             if (!connections[id]) return;
-            addSystemMsg(`<b>${peerNames[id] || "Someone"}</b> left.`); playLeaveSound();
+            const uname = peerNames[id] || "Someone";
+            addSystemMsg(`<b>${uname}</b> left.`); playLeaveSound();
+            
+            // Clean up typing indicator if they leave while typing
+            if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
+
             ['', '-cam'].forEach(ext => { $(`video-${id}${ext}`)?.remove(); });
             if (screenCalls[id]) { screenCalls[id].close(); delete screenCalls[id]; }
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
@@ -311,8 +331,47 @@
 
         const bcast = d => Object.values(connections).forEach(c => c.open && c.send(d));
         
-        $('send-btn').onclick = () => { const t = $('msg-input').value; if(!t||!Object.keys(connections).length) return; bcast({type:'text',value:t}); addMessage(linkify(escapeHTML(t)), "You", 'mine'); $('msg-input').value = ""; };
+        $('send-btn').onclick = () => { 
+            const t = $('msg-input').value; 
+            if(!t||!Object.keys(connections).length) return; 
+            
+            // Clear typing state instantly when message is sent
+            if (amITyping) { amITyping = false; clearTimeout(typingTimeout); bcast({ type: 'typing', state: false }); }
+            
+            bcast({type:'text',value:t}); 
+            addMessage(linkify(escapeHTML(t)), "You", 'mine'); 
+            $('msg-input').value = ""; 
+        };
         $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
+
+        // --- Typing Detection Logic ---
+        $('msg-input').addEventListener('input', () => {
+            if (!amITyping && $('msg-input').value.trim() !== "") {
+                amITyping = true;
+                bcast({ type: 'typing', state: true });
+            }
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {
+                if (amITyping) {
+                    amITyping = false;
+                    bcast({ type: 'typing', state: false });
+                }
+            }, 1500); // Removes indicator 1.5s after you stop typing
+        });
+
+        function updateTypingUI() {
+            const ind = $('typing-indicator');
+            if (typingUsers.size === 0) {
+                ind.classList.remove('active');
+                ind.innerText = "";
+            } else {
+                ind.classList.add('active');
+                const arr = Array.from(typingUsers);
+                if (arr.length === 1) ind.innerText = `${arr[0]} is typing...`;
+                else if (arr.length === 2) ind.innerText = `${arr[0]} and ${arr[1]} are typing...`;
+                else ind.innerText = `Several people are typing...`;
+            }
+        }
 
         // --- File Sharing Logic ---
         async function sendFile(file) {
