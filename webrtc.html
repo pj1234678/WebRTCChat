@@ -11,7 +11,7 @@
         /* Modern Dark Theme with Premium Typography */
         body { 
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; 
-            background: #111214; /* Deep, rich dark background */
+            background: #111214; 
             color: #f2f3f5; 
             display: flex; 
             height: 100vh; 
@@ -26,84 +26,59 @@
         /* Login Section */
         #login-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(17, 18, 20, 0.95); backdrop-filter: blur(10px); z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; }
         #login-screen h1 { font-weight: 600; margin-bottom: 5px; }
-        input { font-family: 'Inter', sans-serif; padding: 14px; border-radius: 10px; border: 1px solid #383a40; background: #1e1f22; color: white; outline: none; margin-bottom: 12px; width: 220px; text-align: center; font-size: 15px; transition: border-color 0.2s; }
-        input:focus { border-color: #1a73e8; }
-        button { font-family: 'Inter', sans-serif; padding: 14px 28px; border-radius: 10px; border: none; background: #1a73e8; color: #ffffff; font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 12px rgba(26, 115, 232, 0.3); }
-        button:hover { background: #1557b0; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(26, 115, 232, 0.4); }
+        
+        /* FIX: Scoped the input styling strictly to the login screen so it doesn't center the chat text */
+        #login-screen input { font-family: 'Inter', sans-serif; padding: 14px; border-radius: 10px; border: 1px solid #383a40; background: #1e1f22; color: white; outline: none; margin-bottom: 12px; width: 220px; text-align: center; font-size: 15px; transition: border-color 0.2s; }
+        #login-screen input:focus { border-color: #1a73e8; }
+        
+        button { font-family: 'Inter', sans-serif; border: none; background: #1a73e8; color: #ffffff; font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+        button:hover { background: #1557b0; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26, 115, 232, 0.3); }
         button:active { transform: scale(0.98); }
+        
+        #join-btn { padding: 14px 28px; border-radius: 10px; }
 
         /* Sidebar Controls */
         .sidebar h3 { font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: #80848e; margin-bottom: 15px; }
         .sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 12px; }
-        #logout-btn { background: #da373c; color: white; padding: 10px; width: 100%; font-size: 14px; border-radius: 8px; cursor: pointer; border: none; font-weight: 500; box-shadow: none; }
+        #logout-btn { background: #da373c; color: white; padding: 10px; width: 100%; font-size: 14px; border-radius: 8px; font-weight: 500; }
         #logout-btn:hover { background: #a1282c; }
 
         /* Video Grid */
         #video-grid { display: flex; flex-wrap: wrap; gap: 15px; padding: 20px 20px 0 20px; overflow-y: auto; max-height: 40vh; }
         .screen-video { max-height: 300px; flex: 1 1 300px; background: #000; border-radius: 12px; object-fit: contain; width: 100%; box-shadow: 0 8px 24px rgba(0,0,0,0.6); border: 1px solid #2b2d31; }
 
-        /* Chat Area Re-design */
+        /* Chat Area */
         #messages { flex: 1; overflow-y: auto; padding: 25px; display: flex; flex-direction: column; gap: 16px; scroll-behavior: smooth; }
         
-        .msg { 
-            max-width: 70%; 
-            padding: 12px 18px; 
-            border-radius: 20px; /* Highly rounded for modern feel */
-            font-size: 15px; 
-            line-height: 1.5; 
-            word-wrap: break-word; 
-            overflow-wrap: break-word; 
-            word-break: break-word; 
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-            animation: fadeIn 0.3s ease;
-        }
-
+        .msg { max-width: 70%; padding: 12px 18px; border-radius: 20px; font-size: 15px; line-height: 1.5; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; box-shadow: 0 2px 8px rgba(0,0,0,0.15); animation: fadeIn 0.3s ease; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 
-        /* User's Bubbles (Google Blue) */
-        .msg.mine { 
-            align-self: flex-end; 
-            background: #1a73e8; 
-            color: #ffffff; 
-            border-bottom-right-radius: 4px; /* Creates the chat "tail" */
-        }
-        
-        /* Incoming Bubbles (Smooth Grey) */
-        .msg.theirs { 
-            align-self: flex-start; 
-            background: #2b2d31; 
-            color: #dbdee1; 
-            border-bottom-left-radius: 4px; /* Creates the chat "tail" */
-            border: 1px solid #383a40;
-        }
-
+        .msg.mine { align-self: flex-end; background: #1a73e8; color: #ffffff; border-bottom-right-radius: 4px; }
+        .msg.theirs { align-self: flex-start; background: #2b2d31; color: #dbdee1; border-bottom-left-radius: 4px; border: 1px solid #383a40; }
         .msg img { max-width: 100%; border-radius: 12px; margin-top: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); }
         
-        /* Typography for metadata */
         .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; letter-spacing: 0.3px; }
-        .msg.mine .msg-info { color: #8ab4f8; } /* Lightened blue for contrast on dark blue */
+        .msg.mine .msg-info { color: #8ab4f8; } 
         .msg.theirs .msg-info { color: #949ba4; }
 
-        /* Highly readable accessible links */
         .msg a { word-break: break-all; text-decoration-thickness: 2px; font-weight: 500; transition: opacity 0.2s; }
         .msg a:hover { opacity: 0.8; }
         .msg.mine a { color: #d2e3fc; text-decoration-color: #8ab4f8; } 
         .msg.theirs a { color: #5865F2; text-decoration-color: #5865F2; } 
 
-        /* Input Area */
-        .input-bar { padding: 15px 20px; background: #1e1f22; display: flex; gap: 12px; border-top: 1px solid #2b2d31; align-items: center; }
-        #msg-input { flex: 1; font-family: 'Inter', sans-serif; font-size: 15px; padding: 14px 20px; border-radius: 24px; border: 1px solid #383a40; background: #2b2d31; color: #dbdee1; outline: none; transition: 0.2s; }
+        /* Input Area - FIX: Forced matching heights on all elements so they align perfectly */
+        .input-bar { padding: 15px 20px; background: #1e1f22; display: flex; gap: 12px; border-top: 1px solid #2b2d31; align-items: center; box-sizing: border-box; }
+        
+        #msg-input { flex: 1; font-family: 'Inter', sans-serif; font-size: 15px; padding: 0 20px; height: 46px; border-radius: 24px; border: 1px solid #383a40; background: #2b2d31; color: #dbdee1; outline: none; transition: 0.2s; text-align: left; box-sizing: border-box; }
         #msg-input:focus { background: #313338; border-color: #5865F2; }
         
-        /* Utility Buttons */
-        .media-btn { background: #2b2d31; color: #dbdee1; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; font-size: 20px; padding: 0; border-radius: 50%; cursor: pointer; border: none; transition: 0.2s; box-shadow: none; }
-        .media-btn:hover { background: #383a40; transform: translateY(-1px); }
+        .media-btn { background: #2b2d31; color: #dbdee1; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; font-size: 20px; border-radius: 50%; box-sizing: border-box; }
+        .media-btn:hover { background: #383a40; }
         .media-btn.active { background: #da373c; color: white; }
 
-        #send-btn { border-radius: 24px; padding: 12px 24px; }
+        #send-btn { border-radius: 24px; height: 46px; padding: 0 24px; display: flex; align-items: center; justify-content: center; box-sizing: border-box; }
 
-        /* File Input Styling */
-        .file-label { cursor: pointer; font-size: 20px; padding: 12px; color: #949ba4; transition: 0.2s; border-radius: 50%; }
+        .file-label { cursor: pointer; font-size: 20px; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; color: #949ba4; transition: 0.2s; border-radius: 50%; box-sizing: border-box; }
         .file-label:hover { color: #dbdee1; background: #2b2d31; }
         
         /* User List */
@@ -112,19 +87,19 @@
         .user-left { display: flex; align-items: center; gap: 10px; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #dbdee1; }
         .status-dot { width: 10px; height: 10px; background: #23a559; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 8px rgba(35, 165, 89, 0.4); }
         
-        /* Redesigned Volume Slider */
+        /* Redesigned Volume Slider - FIX: Creates the thin "line" effect */
         .vol-slider { 
             -webkit-appearance: none; 
             appearance: none;
-            width: 70px; 
-            height: 4px; 
-            background: #111214; 
-            border-radius: 4px; 
+            width: 65px; 
+            height: 3px; /* The thin line */
+            background: #4f545c; 
+            border-radius: 3px; 
             outline: none; 
             cursor: pointer; 
             transition: background 0.2s ease;
         }
-        .vol-slider:hover { background: #1e1f22; }
+        .vol-slider:hover { background: #6d737e; }
 
         .vol-slider::-webkit-slider-thumb { 
             -webkit-appearance: none; 
@@ -172,7 +147,7 @@
     </div>
 
     <div class="sidebar">
-        <h3>👥 Conference Roster</h3>
+        <h3>👥 Super Mesh Chat</h3>
         <div id="user-list"></div>
         
         <div id="searching-container">
@@ -699,9 +674,10 @@
             if (id === "me") {
                 displayName += " (You)";
             } else {
+                // FIX: Added margin-top to bump the wrapper down slightly, resized the icon, and tightened spacing
                 rightSideHtml = `
-                    <div style="display: flex; align-items: center; gap: 4px; margin-right: 8px;">
-                        <span style="font-size: 12px; opacity: 0.7;" title="Volume">🔊</span>
+                    <div style="display: flex; align-items: center; gap: 5px; margin-right: 8px; margin-top: 3px;">
+                        <span style="font-size: 14px; opacity: 0.8; line-height: 1;" title="Volume">🔊</span>
                         <input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1" title="Adjust Volume">
                     </div>
                     <span id="ping-${id}" class="ping-display ping-med">-- ms</span>
