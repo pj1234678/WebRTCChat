@@ -3,141 +3,71 @@
 <head>
     <meta charset="UTF-8">
     <title>High-Fidelity WebRTC Conference</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        /* Modern Dark Theme with Premium Typography */
-        body { 
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; 
-            background: #111214; 
-            color: #f2f3f5; 
-            display: flex; 
-            height: 100vh; 
-            margin: 0; 
-            overflow: hidden; 
-        }
-        
-        /* Sidebar (Login & Users) */
+        body { font-family: 'Inter', sans-serif; background: #111214; color: #f2f3f5; display: flex; height: 100vh; margin: 0; overflow: hidden; }
         .sidebar { width: 320px; background: #1e1f22; border-right: 1px solid #2b2d31; display: flex; flex-direction: column; padding: 20px; position: relative; }
         .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; background: #111214; }
-
-        /* Login Section */
-        #login-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(17, 18, 20, 0.95); backdrop-filter: blur(10px); z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        #login-screen h1 { font-weight: 600; margin-bottom: 5px; }
         
-        /* FIX: Scoped the input styling strictly to the login screen so it doesn't center the chat text */
-        #login-screen input { font-family: 'Inter', sans-serif; padding: 14px; border-radius: 10px; border: 1px solid #383a40; background: #1e1f22; color: white; outline: none; margin-bottom: 12px; width: 220px; text-align: center; font-size: 15px; transition: border-color 0.2s; }
+        #login-screen { position: absolute; inset: 0; background: rgba(17,18,20,0.95); backdrop-filter: blur(10px); z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #login-screen h1 { font-weight: 600; margin-bottom: 5px; }
+        #login-screen input { font-family: 'Inter', sans-serif; padding: 14px; border-radius: 10px; border: 1px solid #383a40; background: #1e1f22; color: white; outline: none; margin-bottom: 12px; width: 220px; text-align: center; font-size: 15px; transition: 0.2s; }
         #login-screen input:focus { border-color: #1a73e8; }
         
-        button { font-family: 'Inter', sans-serif; border: none; background: #1a73e8; color: #ffffff; font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-        button:hover { background: #1557b0; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26, 115, 232, 0.3); }
+        button { font-family: 'Inter', sans-serif; border: none; background: #1a73e8; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; transition: 0.2s; padding: 14px 28px; border-radius: 10px; }
+        button:hover { background: #1557b0; transform: translateY(-1px); }
         button:active { transform: scale(0.98); }
-        
-        #join-btn { padding: 14px 28px; border-radius: 10px; }
 
-        /* Sidebar Controls */
-        .sidebar h3 { font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: #80848e; margin-bottom: 15px; }
+        .sidebar h3 { font-weight: 600; font-size: 14px; text-transform: uppercase; color: #80848e; margin-bottom: 15px; }
         .sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 12px; }
-        #logout-btn { background: #da373c; color: white; padding: 10px; width: 100%; font-size: 14px; border-radius: 8px; font-weight: 500; }
+        #logout-btn { background: #da373c; padding: 10px; width: 100%; font-size: 14px; border-radius: 8px; }
         #logout-btn:hover { background: #a1282c; }
 
-        /* Video Grid */
+        /* Video Box Styling */
         #video-grid { display: flex; flex-wrap: wrap; gap: 15px; padding: 20px 20px 0 20px; overflow-y: auto; max-height: 40vh; }
-        .screen-video { max-height: 300px; flex: 1 1 300px; background: #000; border-radius: 12px; object-fit: contain; width: 100%; box-shadow: 0 8px 24px rgba(0,0,0,0.6); border: 1px solid #2b2d31; }
+        .screen-video { width: 220px; height: 220px; aspect-ratio: 1 / 1; object-fit: cover; background: #000; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); border: 1px solid #2b2d31; cursor: pointer; transition: 0.2s; }
+        .screen-video:hover { border-color: #5865F2; transform: scale(1.02); }
 
-        /* Chat Area */
         #messages { flex: 1; overflow-y: auto; padding: 25px; display: flex; flex-direction: column; gap: 16px; scroll-behavior: smooth; }
-        
-        .msg { max-width: 70%; padding: 12px 18px; border-radius: 20px; font-size: 15px; line-height: 1.5; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; box-shadow: 0 2px 8px rgba(0,0,0,0.15); animation: fadeIn 0.3s ease; }
+        .msg { max-width: 70%; padding: 12px 18px; border-radius: 20px; font-size: 15px; line-height: 1.5; word-break: break-word; animation: fadeIn 0.3s ease; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .msg.mine { align-self: flex-end; background: #1a73e8; border-bottom-right-radius: 4px; }
+        .msg.theirs { align-self: flex-start; background: #2b2d31; border-bottom-left-radius: 4px; border: 1px solid #383a40; }
+        .msg img { max-width: 100%; border-radius: 12px; margin-top: 8px; cursor: pointer; }
+        .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
+        .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
+        .msg a { color: inherit; font-weight: 500; }
 
-        .msg.mine { align-self: flex-end; background: #1a73e8; color: #ffffff; border-bottom-right-radius: 4px; }
-        .msg.theirs { align-self: flex-start; background: #2b2d31; color: #dbdee1; border-bottom-left-radius: 4px; border: 1px solid #383a40; }
-        .msg img { max-width: 100%; border-radius: 12px; margin-top: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); }
-        
-        .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; letter-spacing: 0.3px; }
-        .msg.mine .msg-info { color: #8ab4f8; } 
-        .msg.theirs .msg-info { color: #949ba4; }
-
-        .msg a { word-break: break-all; text-decoration-thickness: 2px; font-weight: 500; transition: opacity 0.2s; }
-        .msg a:hover { opacity: 0.8; }
-        .msg.mine a { color: #d2e3fc; text-decoration-color: #8ab4f8; } 
-        .msg.theirs a { color: #5865F2; text-decoration-color: #5865F2; } 
-
-        /* Input Area - FIX: Forced matching heights on all elements so they align perfectly */
-        .input-bar { padding: 15px 20px; background: #1e1f22; display: flex; gap: 12px; border-top: 1px solid #2b2d31; align-items: center; box-sizing: border-box; }
-        
-        #msg-input { flex: 1; font-family: 'Inter', sans-serif; font-size: 15px; padding: 0 20px; height: 46px; border-radius: 24px; border: 1px solid #383a40; background: #2b2d31; color: #dbdee1; outline: none; transition: 0.2s; text-align: left; box-sizing: border-box; }
+        .input-bar { padding: 15px 20px; background: #1e1f22; display: flex; gap: 12px; border-top: 1px solid #2b2d31; align-items: center; }
+        #msg-input { flex: 1; font-family: 'Inter', sans-serif; font-size: 15px; padding: 0 20px; height: 46px; border-radius: 24px; border: 1px solid #383a40; background: #2b2d31; color: #dbdee1; outline: none; transition: 0.2s; }
         #msg-input:focus { background: #313338; border-color: #5865F2; }
         
-        .media-btn { background: #2b2d31; color: #dbdee1; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; font-size: 20px; border-radius: 50%; box-sizing: border-box; }
+        /* Unified Button Colors */
+        .media-btn { background: #2b2d31; color: #dbdee1; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; font-size: 20px; border-radius: 50%; border: none; cursor: pointer; transition: 0.2s; }
         .media-btn:hover { background: #383a40; }
-        .media-btn.active { background: #da373c; color: white; }
+        .media-btn.active, .media-btn.highlight-hover:hover { background: #da373c; color: white; }
+        #send-btn { border-radius: 24px; height: 46px; padding: 0 24px; }
 
-        #send-btn { border-radius: 24px; height: 46px; padding: 0 24px; display: flex; align-items: center; justify-content: center; box-sizing: border-box; }
-
-        .file-label { cursor: pointer; font-size: 20px; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; color: #949ba4; transition: 0.2s; border-radius: 50%; box-sizing: border-box; }
-        .file-label:hover { color: #dbdee1; background: #2b2d31; }
-        
-        /* User List */
         .user-item { padding: 12px 14px; background: #2b2d31; margin-bottom: 6px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; border: 1px solid transparent; transition: 0.2s; }
         .user-item:hover { border-color: #383a40; background: #313338; }
-        .user-left { display: flex; align-items: center; gap: 10px; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #dbdee1; }
-        .status-dot { width: 10px; height: 10px; background: #23a559; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 8px rgba(35, 165, 89, 0.4); }
+        .user-left { display: flex; align-items: center; gap: 10px; flex: 1; overflow: hidden; white-space: nowrap; color: #dbdee1; }
+        .status-dot { width: 10px; height: 10px; background: #23a559; border-radius: 50%; box-shadow: 0 0 8px rgba(35,165,89,0.4); }
         
-        /* Redesigned Volume Slider - FIX: Creates the thin "line" effect */
-        .vol-slider { 
-            -webkit-appearance: none; 
-            appearance: none;
-            width: 65px; 
-            height: 3px; /* The thin line */
-            background: #4f545c; 
-            border-radius: 3px; 
-            outline: none; 
-            cursor: pointer; 
-            transition: background 0.2s ease;
-        }
-        .vol-slider:hover { background: #6d737e; }
-
-        .vol-slider::-webkit-slider-thumb { 
-            -webkit-appearance: none; 
-            appearance: none;
-            width: 14px; 
-            height: 14px; 
-            border-radius: 50%; 
-            background: #dbdee1; 
-            cursor: pointer; 
-            transition: 0.1s ease;
-        }
-        .vol-slider::-webkit-slider-thumb:hover { transform: scale(1.2); background: #ffffff; }
-
-        .vol-slider::-moz-range-thumb {
-            width: 14px; 
-            height: 14px; 
-            border: none;
-            border-radius: 50%; 
-            background: #dbdee1; 
-            cursor: pointer; 
-            transition: 0.1s ease;
-        }
-        .vol-slider::-moz-range-thumb:hover { transform: scale(1.2); background: #ffffff; }
+        .vol-slider { -webkit-appearance: none; width: 65px; height: 3px; background: #4f545c; border-radius: 3px; outline: none; cursor: pointer; transition: 0.2s; }
+        .vol-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #dbdee1; transition: 0.1s; }
+        .vol-slider::-webkit-slider-thumb:hover { transform: scale(1.2); background: #fff; }
         
-        .ping-display { font-size: 11px; font-weight: 600; color: #949ba4; background: #111214; padding: 3px 8px; border-radius: 6px; font-family: 'Inter', monospace; white-space: nowrap; }
-        .ping-good { color: #23a559; }
-        .ping-med { color: #f0b232; }
-        .ping-bad { color: #da373c; }
+        .ping-display { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; font-family: monospace; white-space: nowrap; }
+        .ping-good { color: #23a559; } .ping-med { color: #f0b232; } .ping-bad { color: #da373c; }
 
-        /* Searching Animation */
-        #searching-container { margin-top: 20px; padding: 20px; text-align: center; color: #949ba4; font-size: 13px; font-weight: 500; display: none; flex-direction: column; align-items: center; gap: 15px; }
-        .radar { width: 44px; height: 44px; border-radius: 50%; background: rgba(26, 115, 232, 0.1); position: relative; }
-        .radar::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 12px; height: 12px; background: #1a73e8; border-radius: 50%; box-shadow: 0 0 0 0 rgba(26, 115, 232, 0.7); animation: pulse-blue 1.5s infinite; }
-        @keyframes pulse-blue { 0% { box-shadow: 0 0 0 0 rgba(26, 115, 232, 0.7); } 70% { box-shadow: 0 0 0 20px rgba(26, 115, 232, 0); } 100% { box-shadow: 0 0 0 0 rgba(26, 115, 232, 0); } }
+        #searching-container { padding: 20px; text-align: center; color: #949ba4; font-size: 13px; font-weight: 500; display: none; flex-direction: column; align-items: center; gap: 15px; }
+        .radar { width: 44px; height: 44px; border-radius: 50%; background: rgba(26,115,232,0.1); position: relative; }
+        .radar::after { content: ''; position: absolute; inset: 50%; transform: translate(-50%,-50%); width: 12px; height: 12px; background: #1a73e8; border-radius: 50%; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(26,115,232,0.7); } 70% { box-shadow: 0 0 0 20px rgba(26,115,232,0); } 100% { box-shadow: 0 0 0 0 transparent; } }
     </style>
 </head>
 <body>
-
     <div id="login-screen">
         <h1>🚀 Super Mesh Chat</h1>
         <p style="color:#949ba4; margin-top: 0; margin-bottom: 25px; font-weight: 500;">Multi-User Conference Room</p>
@@ -149,561 +79,221 @@
     <div class="sidebar">
         <h3>👥 Super Mesh Chat</h3>
         <div id="user-list"></div>
-        
         <div id="searching-container">
             <div class="radar"></div>
             <div>Waiting for peers...<br><span style="font-size:11px; opacity:0.7;">Share password to invite</span></div>
         </div>
-
         <div class="sidebar-footer">
-            <div style="color: #949ba4; font-size: 12px; font-weight: 500; text-align: center; background: #111214; padding: 8px; border-radius: 8px;">
-                Network: <span id="conn-status" style="color: #f0b232;">Connecting...</span>
-            </div>
+            <div style="color: #949ba4; font-size: 12px; font-weight: 500; text-align: center; background: #111214; padding: 8px; border-radius: 8px;">Network: <span id="conn-status" style="color: #f0b232;">Connecting...</span></div>
             <button id="logout-btn">Leave Room</button>
         </div>
     </div>
 
     <div class="main-area">
-        <div id="video-grid"></div> <div id="messages"></div>
+        <div id="video-grid"></div>
+        <div id="messages"></div>
         <div class="input-bar">
             <button id="mute-btn" class="media-btn" title="Toggle Mic">🎤</button>
+            <button id="cam-btn" class="media-btn" title="Toggle Webcam">📷</button>
             <button id="screen-btn" class="media-btn" title="Share Screen">🖥️</button>
             <input type="file" id="file-input" style="display: none;">
-            <label for="file-input" class="file-label" title="Send File/Photo">📎</label>
+            <label for="file-input" class="media-btn highlight-hover" title="Send File/Photo">📎</label>
             <input type="text" id="msg-input" placeholder="Type a message..." disabled>
             <button id="send-btn" disabled>Send</button>
         </div>
     </div>
 
     <script>
-        // --- NATIVE WEB AUDIO SFX ---
-        function playBeep(freq, type) {
-            try {
-                const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.type = type; osc.frequency.setValueAtTime(freq, ctx.currentTime);
-                gain.gain.setValueAtTime(0.05, ctx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-                osc.connect(gain); gain.connect(ctx.destination);
-                osc.start(); osc.stop(ctx.currentTime + 0.3);
-            } catch (e) { }
-        }
-        const playJoinSound = () => playBeep(880, 'sine'); 
-        const playLeaveSound = () => playBeep(440, 'triangle'); 
+        const $ = id => document.getElementById(id);
+        const playBeep = (freq, type) => { try { const ctx=new(window.AudioContext||window.webkitAudioContext)(),osc=ctx.createOscillator(),g=ctx.createGain();osc.type=type;osc.frequency.value=freq;g.gain.setValueAtTime(0.05,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.connect(g);g.connect(ctx.destination);osc.start();osc.stop(ctx.currentTime+0.3); } catch(e){} };
+        const playJoinSound = () => playBeep(880, 'sine'), playLeaveSound = () => playBeep(440, 'triangle'); 
 
-        // --- DOM Elements ---
-        const loginScreen = document.getElementById('login-screen');
-        const userList = document.getElementById('user-list');
-        const searchingUI = document.getElementById('searching-container');
-        const videoGrid = document.getElementById('video-grid');
-        const messagesDiv = document.getElementById('messages');
-        const msgInput = document.getElementById('msg-input');
-        const sendBtn = document.getElementById('send-btn');
-        const fileInput = document.getElementById('file-input');
-        const muteBtn = document.getElementById('mute-btn');
-        const screenBtn = document.getElementById('screen-btn');
-        const statusText = document.getElementById('conn-status');
-        const usernameInput = document.getElementById('username');
-        const roomPassInput = document.getElementById('room-pass');
-        const joinBtn = document.getElementById('join-btn');
+        let myName = "", myId = "", isHost = false, peer, ROOM_ID = "", localStream = null, isMuted = false;
+        let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
+        const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {};
+        const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
-        // --- Mesh Networking State ---
-        let myName = "";
-        let myId = "";
-        let isHost = false;
-        let peer;            
-        let ROOM_ID = ""; 
-        
-        let localStream = null;
-        let isMuted = false;
-        
-        let screenStream = null;
-        let screenCalls = {}; 
+        const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
+        $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
+        const escapeHTML = s => s.replace(/[&<>'"]/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[t]));
+        const linkify = s => s.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank">${url}</a>`);
 
-        const connections = {}; 
-        const peerNames = {};   
-        const fileTransfers = {}; 
-        
-        // Network Stability Trackers
-        const pendingConnections = new Set();
-        const lastSeen = {};
-
-        const peerConfig = {
-            config: {
-                'iceServers': [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
-                ]
-            }
-        };
-
-        const triggerLoginOnEnter = (e) => { if (e.key === 'Enter') joinBtn.click(); };
-        usernameInput.addEventListener('keypress', triggerLoginOnEnter);
-        roomPassInput.addEventListener('keypress', triggerLoginOnEnter);
-
-        // --- Text Formatting Helpers ---
-        function escapeHTML(str) {
-            return str.replace(/[&<>'"]/g, tag => ({
-                '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
-            }[tag]));
-        }
-
-        function linkify(text) {
-            const urlRegex = /(https?:\/\/[^\s]+)/g;
-            return text.replace(urlRegex, function(url) {
-                return `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
-            });
-        }
-
-        // --- Initialize ---
-        joinBtn.onclick = async () => {
-            myName = usernameInput.value.trim() || "Anon";
-            const userPasswordInput = roomPassInput.value.trim();
-            const STATIC_PASSWORD = "secretpassword"; 
-            
-            if (userPasswordInput !== STATIC_PASSWORD) return alert("Incorrect password! Access denied.");
-            ROOM_ID = "superconf-mesh-" + STATIC_PASSWORD;
-
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } 
-                });
-            } catch (err) {
-                console.warn("No mic found or permission denied.");
-                muteBtn.style.display = 'none'; 
-            }
-
-            loginScreen.style.display = 'none';
-            statusText.innerText = "Initializing...";
+        $('join-btn').onclick = async () => {
+            myName = $('username').value.trim() || "Anon";
+            if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
+            ROOM_ID = "superconf-mesh-secretpassword";
+            try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); } 
+            catch(err) { $('mute-btn').style.display = 'none'; }
+            $('login-screen').style.display = 'none'; $('conn-status').innerText = "Initializing...";
             initPeerJS();
         };
 
-        // --- Core Mesh Logic ---
         function initPeerJS() {
-            searchingUI.style.display = 'flex';
-
+            $('searching-container').style.display = 'flex';
             peer = new Peer(ROOM_ID, peerConfig);
-
-            peer.on('connection', (conn) => handleNewConnection(conn));
-            peer.on('call', (call) => handleNewCall(call));
-
-            peer.on('open', (id) => {
-                myId = id;
-                isHost = true;
-                statusText.innerText = "Host Ready";
-                statusText.style.color = "#23a559";
-                
-                addSystemMsg(`You created the room as <b>${myName}</b>`);
-                addUserToSidebar(myName, "me"); 
-                enableChat();
+            peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
+            peer.on('open', id => {
+                myId = id; isHost = true; $('conn-status').innerText = "Host Ready"; $('conn-status').style.color = "#23a559";
+                addSystemMsg(`You created the room as <b>${myName}</b>`); addUserToSidebar(myName, "me"); enableChat();
             });
-
-            peer.on('error', (err) => {
+            peer.on('error', err => {
                 if (err.type === 'unavailable-id') {
-                    peer = new Peer(peerConfig); 
-                    
-                    peer.on('connection', (conn) => handleNewConnection(conn));
-                    peer.on('call', (call) => handleNewCall(call));
-                    
-                    peer.on('error', (guestErr) => {
-                        if (guestErr.type !== 'peer-unavailable') {
-                            console.error("Guest PeerJS Error:", guestErr);
-                        }
+                    peer = new Peer(peerConfig);
+                    peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
+                    peer.on('open', id => {
+                        myId = id; isHost = false; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
+                        addSystemMsg(`You joined as <b>${myName}</b>`); addUserToSidebar(myName, "me"); connectToPeer(ROOM_ID); enableChat();
                     });
-                    
-                    peer.on('open', (id) => {
-                        myId = id;
-                        isHost = false;
-                        statusText.innerText = "Connected to Mesh";
-                        statusText.style.color = "#23a559";
-
-                        addSystemMsg(`You joined the room as <b>${myName}</b>`);
-                        addUserToSidebar(myName, "me"); 
-                        
-                        connectToPeer(ROOM_ID); 
-                        enableChat();
-                    });
-                } else if (err.type !== 'peer-unavailable') {
-                    console.error("PeerJS Error:", err);
                 }
             });
         }
 
         function connectToPeer(targetId) {
             if (connections[targetId] || pendingConnections.has(targetId) || targetId === myId) return;
-            
-            pendingConnections.add(targetId);
-            setTimeout(() => { pendingConnections.delete(targetId); }, 4000);
-
-            const conn = peer.connect(targetId);
-            handleNewConnection(conn);
-
-            if (localStream) {
-                const call = peer.call(targetId, localStream, { metadata: { type: 'audio' } });
-                handleNewCall(call);
-            }
+            pendingConnections.add(targetId); setTimeout(() => pendingConnections.delete(targetId), 4000);
+            const conn = peer.connect(targetId); handleNewConnection(conn);
+            if (localStream) handleNewCall(peer.call(targetId, localStream, { metadata: { type: 'audio' } }));
         }
 
         function handleNewConnection(conn) {
-            const setupData = () => {
-                pendingConnections.delete(conn.peer); 
-                lastSeen[conn.peer] = Date.now(); 
-                
-                searchingUI.style.display = 'none';
-                connections[conn.peer] = conn;
-
-                if (!isHost && conn.peer === ROOM_ID) {
-                    statusText.innerText = "Connected to Mesh";
-                    statusText.style.color = "#23a559";
-                }
-                
+            const setup = () => {
+                pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
+                $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
+                if (!isHost && conn.peer === ROOM_ID) { $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559"; }
                 conn.send({ type: 'name', value: myName });
-
-                if (isHost) {
-                    const otherPeers = Object.keys(connections).filter(id => id !== conn.peer);
-                    if (otherPeers.length > 0) {
-                        conn.send({ type: 'peer-list', peers: otherPeers });
-                    }
-                }
-
-                if (screenStream) {
-                    const screenCall = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' } });
-                    screenCalls[conn.peer] = screenCall;
-                }
+                if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
+                if (screenStream) screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' } });
+                if (camStream) camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' } });
             };
-
-            if (conn.open) setupData();
-            else conn.on('open', setupData);
-
-            conn.on('data', (data) => {
-                const senderId = conn.peer;
-                
-                lastSeen[senderId] = Date.now(); 
-
-                if (data.type === 'name') {
-                    peerNames[senderId] = data.value;
-                    addUserToSidebar(data.value, senderId);
-                    addSystemMsg(`<b>${data.value}</b> joined the mesh.`);
-                    playJoinSound();
-                } 
-                else if (data.type === 'peer-list' || data.type === 'mesh-sync') {
-                    data.peers.forEach(peerId => {
-                        if (peerId !== myId && !connections[peerId]) connectToPeer(peerId);
-                    });
-                } 
-                else if (data.type === 'text') {
-                    const safeText = linkify(escapeHTML(data.value));
-                    addMessage(safeText, peerNames[senderId] || "Unknown", 'theirs');
-                } 
-                else if (data.type === 'ping') {
-                    conn.send({ type: 'pong', time: data.time }); 
-                } 
-                else if (data.type === 'pong') {
-                    updatePingUI(senderId, Date.now() - data.time);
-                }
-                else if (data.type === 'file-meta') {
-                    fileTransfers[senderId] = { meta: data, chunks: [], received: 0 };
-                    addSystemMsg(`Receiving ${data.name} from ${peerNames[senderId]}...`);
-                } 
+            conn.open ? setup() : conn.on('open', setup);
+            conn.on('data', data => {
+                const sid = conn.peer; lastSeen[sid] = Date.now();
+                if (data.type === 'name') { peerNames[sid] = data.value; addUserToSidebar(data.value, sid); addSystemMsg(`<b>${data.value}</b> joined.`); playJoinSound(); }
+                else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
+                else if (data.type === 'text') addMessage(linkify(escapeHTML(data.value)), peerNames[sid] || "Unknown", 'theirs');
+                else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
+                else if (data.type === 'pong') updatePingUI(sid, Date.now() - data.time);
+                else if (data.type === 'file-meta') { fileTransfers[sid] = { meta: data, chunks: [], received: 0 }; }
                 else if (data.type === 'file-chunk') {
-                    const transfer = fileTransfers[senderId];
-                    if (!transfer) return;
-
-                    transfer.chunks.push(data.data);
-                    transfer.received += data.data.byteLength;
-                    
-                    if (transfer.received >= transfer.meta.size) {
-                        const blob = new Blob(transfer.chunks, { type: transfer.meta.fileType });
-                        const url = URL.createObjectURL(blob);
-                        
-                        if (transfer.meta.fileType.startsWith('image/')) {
-                            addMessage(`<img src="${url}">`, peerNames[senderId], 'theirs');
-                        } else {
-                            addMessage(`<div>📂 ${transfer.meta.name}</div><a href="${url}" download="${transfer.meta.name}" style="color: #23a559; display:block; margin-top:8px; text-decoration: underline;">Download</a>`, peerNames[senderId], 'theirs');
-                        }
-                        delete fileTransfers[senderId]; 
+                    const tr = fileTransfers[sid]; if(!tr) return;
+                    tr.chunks.push(data.data); tr.received += data.data.byteLength;
+                    if (tr.received >= tr.meta.size) {
+                        const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
+                        if(tr.meta.fileType.startsWith('image/')) addMessage(`<img src="${url}">`, peerNames[sid], 'theirs');
+                        else addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:block; margin-top:8px;">Download</a>`, peerNames[sid], 'theirs');
+                        delete fileTransfers[sid];
                     }
                 }
             });
-
-            conn.on('close', () => removePeer(conn.peer));
-            conn.on('error', () => removePeer(conn.peer));
+            conn.on('close', () => removePeer(conn.peer)); conn.on('error', () => removePeer(conn.peer));
         }
 
-        // --- Handle Incoming Calls (Mic or Screen) ---
         function handleNewCall(call) {
-            if (call.metadata && call.metadata.type === 'screenshare') {
-                call.answer(); 
-                call.on('stream', (remoteStream) => {
-                    addVideoElement(call.peer, remoteStream, false);
-                });
-                call.on('close', () => {
-                    document.getElementById('video-' + call.peer)?.remove();
-                });
+            const type = call.metadata?.type;
+            if (type === 'screenshare' || type === 'webcam') {
+                call.answer();
+                call.on('stream', st => addVideoElement(call.peer + (type==='webcam'?'-cam':''), st, false));
+                call.on('close', () => $(`video-${call.peer}${type==='webcam'?'-cam':''}`)?.remove());
                 return;
             }
-
-            if (localStream) call.answer(localStream);
-            else call.answer(); 
-
-            call.on('stream', (remoteStream) => {
-                if (!document.getElementById('audio-' + call.peer)) {
-                    const audio = new Audio();
-                    audio.id = 'audio-' + call.peer;
-                    audio.srcObject = remoteStream;
-                    audio.autoplay = true;
-                    document.body.appendChild(audio);
-
-                    const volSlider = document.getElementById(`vol-${call.peer}`);
-                    if(volSlider) {
-                        audio.volume = volSlider.value;
-                    }
+            localStream ? call.answer(localStream) : call.answer();
+            call.on('stream', st => {
+                if (!$(`audio-${call.peer}`)) {
+                    const a = new Audio(); a.id = `audio-${call.peer}`; a.srcObject = st; a.autoplay = true;
+                    document.body.appendChild(a);
+                    const vs = $(`vol-${call.peer}`); if(vs) a.volume = vs.value;
                 }
             });
         }
 
-        function removePeer(peerId) {
-            if (connections[peerId]) {
-                const name = peerNames[peerId] || "Someone";
-                addSystemMsg(`<b>${name}</b> left the conference.`);
-                playLeaveSound();
-                
-                delete connections[peerId];
-                delete peerNames[peerId];
-                delete fileTransfers[peerId];
-                delete lastSeen[peerId]; 
-                pendingConnections.delete(peerId);
-                
-                document.getElementById(`sidebar-${peerId}`)?.remove();
-                document.getElementById(`audio-${peerId}`)?.remove();
-                document.getElementById(`video-${peerId}`)?.remove();
-
-                if (screenCalls[peerId]) {
-                    screenCalls[peerId].close();
-                    delete screenCalls[peerId];
-                }
-
-                if (peerId === ROOM_ID && !isHost) {
-                    addSystemMsg("Host connection lost. Searching for a new host...");
-                    searchingUI.style.display = 'flex';
-                    statusText.innerText = "Searching for Host...";
-                    statusText.style.color = "#f0b232";
-                }
-            }
-            if (Object.keys(connections).length === 0) {
-                searchingUI.style.display = 'flex';
-            }
+        function removePeer(id) {
+            if (!connections[id]) return;
+            addSystemMsg(`<b>${peerNames[id] || "Someone"}</b> left.`); playLeaveSound();
+            ['', '-cam'].forEach(ext => { $(`video-${id}${ext}`)?.remove(); });
+            if (screenCalls[id]) { screenCalls[id].close(); delete screenCalls[id]; }
+            if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
+            $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
+            delete connections[id]; delete peerNames[id]; delete fileTransfers[id]; delete lastSeen[id]; pendingConnections.delete(id);
+            if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
+            if (!Object.keys(connections).length) $('searching-container').style.display = 'flex';
         }
 
-        // --- Screenshare Logic ---
-        screenBtn.onclick = async () => {
-            if (screenStream) {
-                stopScreenShare();
-                return;
+        // Toggle Video Feeds
+        $('cam-btn').onclick = async () => {
+            if (camStream) {
+                camStream.getTracks().forEach(t => t.stop()); Object.values(camCalls).forEach(c => c.close());
+                camCalls = {}; camStream = null; $('cam-btn').classList.remove('active'); $('video-me-cam')?.remove(); return;
             }
+            try {
+                camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                $('cam-btn').classList.add('active'); addVideoElement('me-cam', camStream, true);
+                Object.keys(connections).forEach(id => camCalls[id] = peer.call(id, camStream, { metadata: { type: 'webcam' } }));
+            } catch (err) { console.error(err); }
+        };
 
+        $('screen-btn').onclick = async () => {
+            if (screenStream) {
+                screenStream.getTracks().forEach(t => t.stop()); Object.values(screenCalls).forEach(c => c.close());
+                screenCalls = {}; screenStream = null; $('screen-btn').classList.remove('active'); $('video-me')?.remove(); return;
+            }
             try {
                 screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-                screenBtn.classList.add('active');
-                
-                addVideoElement('me', screenStream, true); 
-
-                screenStream.getVideoTracks()[0].onended = stopScreenShare;
-
-                Object.keys(connections).forEach(peerId => {
-                    const call = peer.call(peerId, screenStream, { metadata: { type: 'screenshare' } });
-                    screenCalls[peerId] = call;
-                });
-            } catch (err) {
-                console.error("Screenshare cancelled or failed", err);
-            }
+                $('screen-btn').classList.add('active'); addVideoElement('me', screenStream, true);
+                screenStream.getVideoTracks()[0].onended = $('screen-btn').onclick;
+                Object.keys(connections).forEach(id => screenCalls[id] = peer.call(id, screenStream, { metadata: { type: 'screenshare' } }));
+            } catch (err) {}
         };
-
-        function stopScreenShare() {
-            if (!screenStream) return;
-            screenStream.getTracks().forEach(t => t.stop());
-            Object.values(screenCalls).forEach(call => call.close());
-            
-            screenCalls = {};
-            screenStream = null;
-            
-            screenBtn.classList.remove('active');
-            document.getElementById('video-me')?.remove();
-        }
 
         function addVideoElement(id, stream, isLocal) {
-            if (document.getElementById('video-' + id)) return;
-            const video = document.createElement('video');
-            video.id = 'video-' + id;
-            video.className = 'screen-video';
-            video.srcObject = stream;
-            video.autoplay = true;
-            if (isLocal) video.muted = true; 
-            videoGrid.appendChild(video);
+            if ($(`video-${id}`)) return;
+            const v = document.createElement('video');
+            v.id = `video-${id}`; v.className = 'screen-video'; v.srcObject = stream; v.autoplay = true; v.title = "Double-click to fullscreen";
+            if (isLocal) v.muted = true;
+            v.ondblclick = () => v.requestFullscreen?.();
+            $('video-grid').appendChild(v);
         }
 
-        // --- Chat & Data ---
-        function broadcastData(dataObj) {
-            Object.values(connections).forEach(conn => {
-                if (conn.open) conn.send(dataObj);
-            });
-        }
+        const bcast = d => Object.values(connections).forEach(c => c.open && c.send(d));
+        $('send-btn').onclick = () => { const t = $('msg-input').value; if(!t||!Object.keys(connections).length) return; bcast({type:'text',value:t}); addMessage(linkify(escapeHTML(t)), "You", 'mine'); $('msg-input').value = ""; };
+        $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
 
-        sendBtn.onclick = () => {
-            const text = msgInput.value;
-            if (!text || Object.keys(connections).length === 0) return;
-            
-            broadcastData({ type: 'text', value: text });
-            
-            const safeText = linkify(escapeHTML(text));
-            addMessage(safeText, "You", 'mine');
-            msgInput.value = "";
-        };
-
-        msgInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendBtn.click(); });
-
-        fileInput.onchange = async () => {
-            const file = fileInput.files[0];
-            if (!file || Object.keys(connections).length === 0) return;
-            
-            addSystemMsg(`Sending ${file.name} to network...`);
-            broadcastData({ type: 'file-meta', name: file.name, fileType: file.type, size: file.size });
-            
-            const chunkSize = 16 * 1024; 
+        $('file-input').onchange = async () => {
+            const file = $('file-input').files[0]; if (!file || !Object.keys(connections).length) return;
+            addSystemMsg(`Sending ${file.name}...`); bcast({ type: 'file-meta', name: file.name, fileType: file.type, size: file.size });
             let offset = 0;
-            
             while (offset < file.size) {
-                const chunk = file.slice(offset, offset + chunkSize);
-                const buffer = await chunk.arrayBuffer();
-                for (let conn of Object.values(connections)) {
-                    if (conn.open && conn.dataChannel) {
-                        while (conn.dataChannel.bufferedAmount > 1024 * 1024) {
-                            await new Promise(r => setTimeout(r, 50));
-                        }
-                    }
-                }
-                broadcastData({ type: 'file-chunk', data: buffer });
-                offset += chunkSize;
+                const chunk = file.slice(offset, offset + 16384), buffer = await chunk.arrayBuffer();
+                for (let c of Object.values(connections)) if (c.open && c.dataChannel) while (c.dataChannel.bufferedAmount > 1048576) await new Promise(r => setTimeout(r, 50));
+                bcast({ type: 'file-chunk', data: buffer }); offset += 16384;
             }
-            
-            if (file.type.startsWith('image/')) {
-                const localUrl = URL.createObjectURL(file);
-                addMessage(`<img src="${localUrl}">`, "You sent a photo", 'mine');
-            } else {
-                addMessage(`<div>📂 Shared file: ${file.name}</div>`, "You", 'mine');
-            }
-            fileInput.value = ""; 
+            const url = URL.createObjectURL(file);
+            file.type.startsWith('image/') ? addMessage(`<img src="${url}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${file.name}</div>`, "You", 'mine');
+            $('file-input').value = "";
         };
 
-        // --- Mesh Sync & Ping Timeout Loop ---
         setInterval(() => {
             const now = Date.now();
+            Object.keys(connections).forEach(id => { if (now - (lastSeen[id] || now) > 10000) removePeer(id); });
+            if (isHost) { const peers = Object.keys(connections); if(peers.length) bcast({ type: 'mesh-sync', peers }); }
+            else if (!connections[ROOM_ID]) connectToPeer(ROOM_ID);
+            bcast({ type: 'ping', time: now });
+        }, 3000);
 
-            Object.keys(connections).forEach(peerId => {
-                if (now - (lastSeen[peerId] || now) > 10000) {
-                    console.warn(`Connection to ${peerId} timed out.`);
-                    removePeer(peerId);
-                }
-            });
+        function updatePingUI(id, lat) { const p = $(`ping-${id}`); if(p){ p.innerText = `${lat}ms`; p.className = `ping-display ${lat<100?'ping-good':lat<300?'ping-med':'ping-bad'}`; } }
+        function enableChat() { $('msg-input').disabled = $('send-btn').disabled = false; }
+        $('mute-btn').onclick = () => { if(!localStream) return; isMuted = !isMuted; localStream.getAudioTracks()[0].enabled = !isMuted; $('mute-btn').innerHTML = isMuted?"🔇":"🎤"; $('mute-btn').classList.toggle('active', isMuted); };
+        $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
 
-            if (isHost) {
-                const activePeers = Object.keys(connections);
-                if (activePeers.length > 0) broadcastData({ type: 'mesh-sync', peers: activePeers });
-            } else {
-                if (!connections[ROOM_ID]) {
-                    connectToPeer(ROOM_ID);
-                }
-            }
-            
-            broadcastData({ type: 'ping', time: now });
-        }, 3000); 
-
-        function updatePingUI(peerId, latency) {
-            const pingEl = document.getElementById(`ping-${peerId}`);
-            if (pingEl) {
-                pingEl.innerText = `${latency}ms`;
-                pingEl.className = 'ping-display ' + (latency < 100 ? 'ping-good' : latency < 300 ? 'ping-med' : 'ping-bad');
-            }
-        }
-
-        // --- UI Updates ---
-        function enableChat() { msgInput.disabled = false; sendBtn.disabled = false; }
-
-        muteBtn.onclick = () => {
-            if (!localStream) return;
-            isMuted = !isMuted;
-            localStream.getAudioTracks()[0].enabled = !isMuted;
-            muteBtn.innerHTML = isMuted ? "🔇" : "🎤";
-            muteBtn.classList.toggle('active', isMuted);
-        };
-
-        document.getElementById('logout-btn').onclick = () => {
-            if (peer) peer.destroy();
-            location.reload(); 
-        };
-
-        function addMessage(content, user, type) {
-            const div = document.createElement('div');
-            div.className = `msg ${type}`;
-            div.innerHTML = `<div class="msg-info">${user}</div><div>${content}</div>`;
-            messagesDiv.appendChild(div);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        }
-
-        function addSystemMsg(text) {
-            const div = document.createElement('div');
-            div.style.textAlign = "center"; div.style.fontSize = "12px"; div.style.fontWeight = "500"; div.style.color = "#949ba4"; div.style.margin = "10px 0";
-            div.innerHTML = text;
-            messagesDiv.appendChild(div);
-        }
+        function addMessage(html, user, type) { const d = document.createElement('div'); d.className = `msg ${type}`; d.innerHTML = `<div class="msg-info">${user}</div><div>${html}</div>`; $('messages').appendChild(d); $('messages').scrollTop = $('messages').scrollHeight; }
+        function addSystemMsg(txt) { const d = document.createElement('div'); d.style.cssText = "text-align:center;font-size:12px;font-weight:500;color:#949ba4;margin:10px 0"; d.innerHTML = txt; $('messages').appendChild(d); }
 
         function addUserToSidebar(name, id) {
-            if (document.getElementById(`sidebar-${id}`)) {
-                document.getElementById(`name-${id}`).innerText = name;
-                return;
-            }
-
-            const div = document.createElement('div');
-            div.className = 'user-item';
-            div.id = `sidebar-${id}`;
-            
-            let displayName = name;
-            let rightSideHtml = '';
-
-            if (id === "me") {
-                displayName += " (You)";
-            } else {
-                // FIX: Added margin-top to bump the wrapper down slightly, resized the icon, and tightened spacing
-                rightSideHtml = `
-                    <div style="display: flex; align-items: center; gap: 5px; margin-right: 8px; margin-top: 3px;">
-                        <span style="font-size: 14px; opacity: 0.8; line-height: 1;" title="Volume">🔊</span>
-                        <input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1" title="Adjust Volume">
-                    </div>
-                    <span id="ping-${id}" class="ping-display ping-med">-- ms</span>
-                `;
-            }
-
-            div.innerHTML = `
-                <div class="user-left">
-                    <div class="status-dot"></div> 
-                    <span id="name-${id}" title="${displayName}">${displayName}</span>
-                </div>
-                <div style="display:flex; gap:8px; align-items:center;">
-                    ${rightSideHtml}
-                </div>
-            `;
-            userList.appendChild(div);
-
-            if (id !== "me") {
-                const volSlider = document.getElementById(`vol-${id}`);
-                volSlider.addEventListener('input', (e) => {
-                    const audioEl = document.getElementById(`audio-${id}`);
-                    if (audioEl) {
-                        audioEl.volume = e.target.value;
-                    }
-                });
-            }
+            if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
+            const d = document.createElement('div'); d.className = 'user-item'; d.id = `sidebar-${id}`;
+            const right = id === "me" ? '' : `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span style="font-size:14px;opacity:0.8">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
+            d.innerHTML = `<div class="user-left"><div class="status-dot"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
+            $('user-list').appendChild(d);
+            if (id !== "me") $(`vol-${id}`).addEventListener('input', e => { const a = $(`audio-${id}`); if(a) a.volume = e.target.value; });
         }
     </script>
 </body>
