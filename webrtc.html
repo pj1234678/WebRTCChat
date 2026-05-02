@@ -37,11 +37,18 @@
         .msg.theirs { align-self: flex-start; background: #2b2d31; border-bottom-left-radius: 4px; border: 1px solid #383a40; }
         
         /* Chat Thumbnail & Media Styling */
-        .msg img, .msg video { max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .msg img, .msg video { display: block; max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
         .msg video { background: #000; outline: none; }
-        .msg audio { max-width: 260px; outline: none; margin-top: 8px; height: 40px; }
+        .msg audio { display: block; max-width: 260px; outline: none; margin-top: 8px; height: 40px; }
         .msg img:hover, .msg video:hover { transform: scale(1.02); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
         
+        /* Modern Download Button Styling */
+        .chat-media-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: rgba(255, 255, 255, 0.15); color: #fff !important; text-decoration: none; font-size: 13px; font-weight: 600; transition: 0.2s; }
+        .chat-media-link:hover { background: rgba(255, 255, 255, 0.25); transform: translateY(-1px); }
+        .chat-media-link:active { transform: scale(0.98); }
+        .msg.theirs .chat-media-link { background: #1e1f22; color: #dbdee1 !important; border: 1px solid #383a40; }
+        .msg.theirs .chat-media-link:hover { background: #313338; color: #fff !important; }
+
         .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
         .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
         .msg a { color: inherit; font-weight: 500; }
@@ -143,6 +150,9 @@
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
+
+        // Clean SVG Download Icon
+        const dlIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
 
         // Soundboard & Typing globals
         const soundboard = {};
@@ -260,7 +270,7 @@
                     playCustomSound(data.buffer, data.mime); 
                     addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
                     const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
-                    addMessage(`<audio src="${url}" controls></audio><br><a href="${url}" download="${data.name || 'sound'}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
                 }
                 else if (data.type === 'file-meta') { 
                     fileTransfers[sid] = { meta: data, chunks: [], received: 0 }; 
@@ -273,13 +283,13 @@
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
                         
                         if (tr.meta.fileType.startsWith('image/')) {
-                            addMessage(`<img src="${url}"><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Image</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, peerNames[sid], 'theirs');
                         } else if (tr.meta.fileType.startsWith('video/')) {
-                            addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, peerNames[sid], 'theirs');
                         } else if (tr.meta.fileType.startsWith('audio/')) {
-                            addMessage(`<audio src="${url}" controls></audio><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Audio</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid], 'theirs');
                         } else {
-                            addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:block; margin-top:8px; font-weight:600;">⬇️ Download File</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, peerNames[sid], 'theirs');
                         }
                         delete fileTransfers[sid];
                     }
@@ -436,7 +446,7 @@
                     playCustomSound(buffer, file.type);
                     if (Object.keys(connections).length > 0) {
                         const url = URL.createObjectURL(new Blob([buffer], { type: file.type }));
-                        addMessage(`<audio src="${url}" controls></audio><br><a href="${url}" download="${file.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Audio</a>`, "You", 'mine');
+                        addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${file.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                         bcast({ type: 'play-sound', buffer: buffer, mime: file.type, name: file.name });
                     }
                 } else {
@@ -461,13 +471,13 @@
             
             const url = URL.createObjectURL(file);
             if (file.type.startsWith('image/')) {
-                addMessage(`<img src="${url}"><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Image</a>`, "You", 'mine');
+                addMessage(`<img src="${url}"><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
             } else if (file.type.startsWith('video/')) {
-                addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, "You", 'mine');
+                addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Video</a>`, "You", 'mine');
             } else if (file.type.startsWith('audio/')) {
-                addMessage(`<audio src="${url}" controls></audio><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Audio</a>`, "You", 'mine');
+                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
             } else {
-                addMessage(`<div>📂 Shared: ${filename}</div><a href="${url}" download="${filename}" style="color:#23a559; display:block; margin-top:8px; font-weight:600;">⬇️ Download File</a>`, "You", 'mine');
+                addMessage(`<div>📂 Shared: ${filename}</div><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download File</a>`, "You", 'mine');
             }
         }
 
@@ -513,7 +523,7 @@
                 playCustomSound(soundboard[num].buffer, soundboard[num].mime);
                 if (Object.keys(connections).length > 0) {
                     const url = URL.createObjectURL(new Blob([soundboard[num].buffer], { type: soundboard[num].mime }));
-                    addMessage(`<audio src="${url}" controls></audio><br><a href="${url}" download="${soundboard[num].name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Audio</a>`, "You", 'mine');
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${soundboard[num].name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                     bcast({ type: 'play-sound', buffer: soundboard[num].buffer, mime: soundboard[num].mime, name: soundboard[num].name });
                 }
             }
