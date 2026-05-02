@@ -41,7 +41,7 @@
         .msg a { color: inherit; font-weight: 500; }
 
         /* Typing Indicator Styling */
-        #typing-indicator { font-size: 13px; color: #949ba4; font-style: italic; padding: 0 25px 10px 25px; min-height: 20px; opacity: 0; transition: opacity 0.3s ease; font-weight: 500; }
+        #typing-indicator { font-size: 13px; color: #949ba4; font-style: italic; padding: 0 25px 10px 25px; min-height: 20px; opacity: 0; transition: opacity 0.3s ease; font-weight: 500; text-align: center; }
         #typing-indicator.active { opacity: 1; }
 
         .input-bar { padding: 15px 20px; background: #1e1f22; display: flex; gap: 12px; border-top: 1px solid #2b2d31; align-items: center; }
@@ -356,7 +356,7 @@
                     amITyping = false;
                     bcast({ type: 'typing', state: false });
                 }
-            }, 1500); // Removes indicator 1.5s after you stop typing
+            }, 500); // 500ms timeout for a snappy feel
         });
 
         function updateTypingUI() {
