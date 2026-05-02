@@ -46,7 +46,7 @@
         /* Unified Media Button Colors */
         .media-btn { background: #2b2d31; color: #dbdee1; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; font-size: 20px; border-radius: 50%; border: none; cursor: pointer; transition: 0.2s; padding: 0; line-height: 1; }
         .media-btn:hover, .media-btn.highlight-hover:hover { background: #383a40; color: #fff; box-shadow: none; }
-        .media-btn.active { background: #383a40; color: #fff; box-shadow: inset 0 2px 6px rgba(0,0,0,0.4); } /* Active gets an inset shadow to look "pressed" while matching hover color */
+        .media-btn.active { background: #383a40; color: #fff; box-shadow: inset 0 2px 6px rgba(0,0,0,0.4); } 
         #send-btn { border-radius: 24px; height: 46px; padding: 0 24px; }
 
         .user-item { padding: 12px 14px; background: #2b2d31; margin-bottom: 6px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; border: 1px solid transparent; transition: 0.2s; }
@@ -99,8 +99,13 @@
             <button id="mute-btn" class="media-btn" title="Toggle Mic">🎤</button>
             <button id="cam-btn" class="media-btn" title="Toggle Webcam">📷</button>
             <button id="screen-btn" class="media-btn" title="Share Screen">🖥️</button>
+            
+            <input type="file" id="soundboard-input" accept="audio/*" style="display: none;">
+            <label for="soundboard-input" class="media-btn highlight-hover" title="Bind Sound to Numpad">🎵</label>
+            
             <input type="file" id="file-input" style="display: none;">
             <label for="file-input" class="media-btn highlight-hover" title="Send File/Photo">📎</label>
+            
             <input type="text" id="msg-input" placeholder="Type a message..." disabled>
             <button id="send-btn" disabled>Send</button>
         </div>
@@ -116,6 +121,10 @@
         const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
+        // Soundboard globals
+        const soundboard = {};
+        let waitingForKeyBind = null;
+
         const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
         $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
         const escapeHTML = s => s.replace(/[&<>'"]/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[t]));
@@ -130,7 +139,6 @@
             
             $('login-screen').style.display = 'none'; $('conn-status').innerText = "Initializing...";
             
-            // Start the room clock
             $('room-clock').style.display = 'inline-block';
             const tickClock = () => { $('room-clock').innerText = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
             tickClock();
@@ -184,6 +192,7 @@
                 else if (data.type === 'text') addMessage(linkify(escapeHTML(data.value)), peerNames[sid] || "Unknown", 'theirs');
                 else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
                 else if (data.type === 'pong') updatePingUI(sid, Date.now() - data.time);
+                else if (data.type === 'play-sound') { playCustomSound(data.buffer, data.mime); addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`); }
                 else if (data.type === 'file-meta') { fileTransfers[sid] = { meta: data, chunks: [], received: 0 }; }
                 else if (data.type === 'file-chunk') {
                     const tr = fileTransfers[sid]; if(!tr) return;
@@ -263,19 +272,14 @@
             v.autoplay = true; 
             v.playsInline = true;
             v.title = "Click to fullscreen";
-            
             if (isLocal) v.muted = true;
-            
-            // 1-click fullscreen requirement
             v.onclick = () => v.requestFullscreen?.();
-            
-            // Force playback and completely disallow pausing
             v.onpause = () => v.play();
-            
             $('video-grid').appendChild(v);
         }
 
         const bcast = d => Object.values(connections).forEach(c => c.open && c.send(d));
+        
         $('send-btn').onclick = () => { const t = $('msg-input').value; if(!t||!Object.keys(connections).length) return; bcast({type:'text',value:t}); addMessage(linkify(escapeHTML(t)), "You", 'mine'); $('msg-input').value = ""; };
         $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
 
@@ -292,6 +296,50 @@
             file.type.startsWith('image/') ? addMessage(`<img src="${url}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${file.name}</div>`, "You", 'mine');
             $('file-input').value = "";
         };
+
+        // --- Soundboard Logic ---
+        $('soundboard-input').onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            // Cap at 500KB to ensure smooth real-time playing without data channel clogging
+            if (file.size > 500 * 1024) return alert("For instant real-time playback, please keep sound files under 500KB.");
+            
+            waitingForKeyBind = { buffer: await file.arrayBuffer(), mime: file.type, name: file.name };
+            addSystemMsg(`Press a <b>Numpad key (0-9)</b> to bind the sound <b>${file.name}</b>...`);
+            e.target.value = "";
+        };
+
+        document.addEventListener('keydown', (e) => {
+            // Strictly check for Numpad keys (Numpad0 to Numpad9)
+            const match = e.code.match(/^Numpad(\d)$/);
+            if (!match) return;
+            const num = match[1];
+
+            if (waitingForKeyBind) {
+                soundboard[num] = waitingForKeyBind;
+                addSystemMsg(`🎵 Bound <b>${waitingForKeyBind.name}</b> to Numpad <b>${num}</b>.`);
+                waitingForKeyBind = null;
+                return;
+            }
+
+            if (soundboard[num]) {
+                playCustomSound(soundboard[num].buffer, soundboard[num].mime);
+                if (Object.keys(connections).length > 0) {
+                    addMessage(`<i>Played a sound...</i>`, "You", 'mine');
+                    bcast({ type: 'play-sound', buffer: soundboard[num].buffer, mime: soundboard[num].mime });
+                }
+            }
+        });
+
+        function playCustomSound(buffer, mime) {
+            try {
+                const blob = new Blob([buffer], { type: mime });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                audio.play().catch(err => console.log("Sound play prevented:", err));
+                audio.onended = () => URL.revokeObjectURL(url); // Cleanup memory
+            } catch (err) {}
+        }
 
         setInterval(() => {
             const now = Date.now();
