@@ -38,6 +38,7 @@
         /* Chat Thumbnail & Video Styling */
         .msg img, .msg video { max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
         .msg video { background: #000; outline: none; }
+        .msg img:hover, .msg video:hover { transform: scale(1.02); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
         
         .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
         .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
@@ -228,7 +229,7 @@
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
                         
                         if (tr.meta.fileType.startsWith('image/')) {
-                            addMessage(`<img src="${url}"><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Photo</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<img src="${url}"><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Image</a>`, peerNames[sid], 'theirs');
                         } else if (tr.meta.fileType.startsWith('video/')) {
                             addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, peerNames[sid], 'theirs');
                         } else {
@@ -413,7 +414,7 @@
             
             const url = URL.createObjectURL(file);
             if (file.type.startsWith('image/')) {
-                addMessage(`<img src="${url}"><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Photo</a>`, "You", 'mine');
+                addMessage(`<img src="${url}"><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Image</a>`, "You", 'mine');
             } else if (file.type.startsWith('video/')) {
                 addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, "You", 'mine');
             } else {
