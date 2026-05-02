@@ -19,7 +19,7 @@
         button:hover { background: #1557b0; transform: translateY(-1px); }
         button:active { transform: scale(0.98); }
 
-        .sidebar h3 { font-weight: 600; font-size: 14px; text-transform: uppercase; color: #80848e; margin-bottom: 15px; }
+        .sidebar h3 { font-weight: 600; font-size: 14px; text-transform: uppercase; color: #80848e; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
         .sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 12px; }
         #logout-btn { background: #da373c; padding: 10px; width: 100%; font-size: 14px; border-radius: 8px; }
         #logout-btn:hover { background: #a1282c; }
@@ -43,10 +43,10 @@
         #msg-input { flex: 1; font-family: 'Inter', sans-serif; font-size: 15px; padding: 0 20px; height: 46px; border-radius: 24px; border: 1px solid #383a40; background: #2b2d31; color: #dbdee1; outline: none; transition: 0.2s; }
         #msg-input:focus { background: #313338; border-color: #dbdee1; }
         
-        /* Unified Clean White Button Colors */
+        /* Unified Media Button Colors */
         .media-btn { background: #2b2d31; color: #dbdee1; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; font-size: 20px; border-radius: 50%; border: none; cursor: pointer; transition: 0.2s; padding: 0; line-height: 1; }
-        .media-btn:hover { background: #383a40; color: #fff; }
-        .media-btn.active, .media-btn.highlight-hover:hover { background: #fff; color: #111214; box-shadow: 0 0 12px rgba(255, 255, 255, 0.2); }
+        .media-btn:hover, .media-btn.highlight-hover:hover { background: #383a40; color: #fff; box-shadow: none; }
+        .media-btn.active { background: #383a40; color: #fff; box-shadow: inset 0 2px 6px rgba(0,0,0,0.4); } /* Active gets an inset shadow to look "pressed" while matching hover color */
         #send-btn { border-radius: 24px; height: 46px; padding: 0 24px; }
 
         .user-item { padding: 12px 14px; background: #2b2d31; margin-bottom: 6px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; border: 1px solid transparent; transition: 0.2s; }
@@ -77,7 +77,10 @@
     </div>
 
     <div class="sidebar">
-        <h3>👥 Super Mesh Chat</h3>
+        <h3>
+            <span>👥 Super Mesh Chat</span>
+            <span id="room-clock" style="font-size: 12px; color: #8ab4f8; display: none;"></span>
+        </h3>
         <div id="user-list"></div>
         <div id="searching-container">
             <div class="radar"></div>
@@ -124,7 +127,15 @@
             ROOM_ID = "superconf-mesh-secretpassword";
             try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); } 
             catch(err) { $('mute-btn').style.display = 'none'; }
+            
             $('login-screen').style.display = 'none'; $('conn-status').innerText = "Initializing...";
+            
+            // Start the room clock
+            $('room-clock').style.display = 'inline-block';
+            const tickClock = () => { $('room-clock').innerText = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
+            tickClock();
+            setInterval(tickClock, 1000);
+
             initPeerJS();
         };
 
