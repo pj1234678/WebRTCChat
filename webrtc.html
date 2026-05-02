@@ -35,9 +35,10 @@
         .msg.mine { align-self: flex-end; background: #1a73e8; border-bottom-right-radius: 4px; }
         .msg.theirs { align-self: flex-start; background: #2b2d31; border-bottom-left-radius: 4px; border: 1px solid #383a40; }
         
-        /* Chat Thumbnail Styling */
-        .msg img { max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; cursor: pointer; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
-        .msg img:hover { transform: scale(1.02); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+        /* Chat Thumbnail & Video Styling */
+        .msg img, .msg video { max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .msg video { background: #000; outline: none; }
+        .msg img:hover { transform: scale(1.02); box-shadow: 0 6px 16px rgba(0,0,0,0.3); cursor: pointer; }
         
         .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
         .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
@@ -256,8 +257,14 @@
                     tr.chunks.push(data.data); tr.received += data.data.byteLength;
                     if (tr.received >= tr.meta.size) {
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
-                        if(tr.meta.fileType.startsWith('image/')) addMessage(`<img src="${url}" data-filename="${tr.meta.name}">`, peerNames[sid], 'theirs');
-                        else addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:block; margin-top:8px;">Download</a>`, peerNames[sid], 'theirs');
+                        
+                        if (tr.meta.fileType.startsWith('image/')) {
+                            addMessage(`<img src="${url}" data-filename="${tr.meta.name}">`, peerNames[sid], 'theirs');
+                        } else if (tr.meta.fileType.startsWith('video/')) {
+                            addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, peerNames[sid], 'theirs');
+                        } else {
+                            addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:block; margin-top:8px; font-weight:600;">⬇️ Download File</a>`, peerNames[sid], 'theirs');
+                        }
                         delete fileTransfers[sid];
                     }
                 }
@@ -416,7 +423,7 @@
                         bcast({ type: 'play-sound', buffer: buffer, mime: file.type });
                     }
                 } else {
-                    // Else, send as shared file or photo
+                    // Else, send as shared file, photo, or video
                     sendFile(file);
                 }
             }
@@ -424,7 +431,7 @@
 
         async function sendFile(file) {
             if (!file || !Object.keys(connections).length) return;
-            const filename = file.name || `Pasted Image - ${new Date().toLocaleTimeString()}.png`;
+            const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
             addSystemMsg(`Sending ${filename}...`); 
             bcast({ type: 'file-meta', name: filename, fileType: file.type, size: file.size });
             
@@ -436,7 +443,13 @@
             }
             
             const url = URL.createObjectURL(file);
-            file.type.startsWith('image/') ? addMessage(`<img src="${url}" data-filename="${filename}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${filename}</div>`, "You", 'mine');
+            if (file.type.startsWith('image/')) {
+                addMessage(`<img src="${url}" data-filename="${filename}">`, "You", 'mine');
+            } else if (file.type.startsWith('video/')) {
+                addMessage(`<video src="${url}" controls preload="metadata"></video><br><a href="${url}" download="${filename}" style="color:#23a559; display:inline-block; margin-top:8px; font-weight:600; font-size:13px;">⬇️ Download Video</a>`, "You", 'mine');
+            } else {
+                addMessage(`<div>📂 Shared: ${filename}</div><a href="${url}" download="${filename}" style="color:#23a559; display:block; margin-top:8px; font-weight:600;">⬇️ Download File</a>`, "You", 'mine');
+            }
         }
 
         $('file-input').onchange = () => {
@@ -447,8 +460,9 @@
         document.addEventListener('paste', (e) => {
             if (e.clipboardData && e.clipboardData.files.length > 0) {
                 const file = e.clipboardData.files[0];
-                if (file.type.startsWith('image/')) {
-                    const pastedFile = new File([file], `Pasted Image - ${new Date().toLocaleTimeString()}.png`, { type: file.type });
+                if (file.type.startsWith('image/') || file.type.startsWith('video/')) {
+                    const ext = file.type.split('/')[1] || 'bin';
+                    const pastedFile = new File([file], `Pasted Media - ${new Date().toLocaleTimeString()}.${ext}`, { type: file.type });
                     sendFile(pastedFile);
                 }
             }
