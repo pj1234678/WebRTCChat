@@ -181,12 +181,12 @@
         async function fetchMyFlag() {
             try {
                 const controller = new AbortController();
-                setTimeout(() => controller.abort(), 2000); // 2s timeout so login isn't delayed
+                setTimeout(() => controller.abort(), 3000); // 3s timeout
                 const res = await fetch('https://get.geojs.io/v1/ip/geo.json', { signal: controller.signal });
                 const data = await res.json();
-                if (data.country) {
-                    // Convert Alpha-2 code (e.g. "US") to Emoji Flag
-                    myFlag = data.country.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397)) + " ";
+                if (data.country_code) {
+                    // Uses 2-letter code (e.g. "US") to generate flag emoji
+                    myFlag = data.country_code.toUpperCase().replace(/./g, char => String.fromCodePoint(char.charCodeAt(0) + 127397)) + " ";
                 }
             } catch(e) { myFlag = "🌐 "; }
         }
