@@ -34,7 +34,8 @@
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         .msg.mine { align-self: flex-end; background: #1a73e8; border-bottom-right-radius: 4px; }
         .msg.theirs { align-self: flex-start; background: #2b2d31; border-bottom-left-radius: 4px; border: 1px solid #383a40; }
-        .msg img { max-width: 100%; border-radius: 12px; margin-top: 8px; cursor: pointer; }
+        .msg img { max-width: 100%; border-radius: 12px; margin-top: 8px; cursor: pointer; transition: 0.2s; }
+        .msg img:hover { transform: scale(1.02); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
         .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
         .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
         .msg a { color: inherit; font-weight: 500; }
@@ -65,9 +66,24 @@
         .radar { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.1); position: relative; }
         .radar::after { content: ''; position: absolute; inset: 50%; transform: translate(-50%,-50%); width: 12px; height: 12px; background: #fff; border-radius: 50%; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,0.7); } 70% { box-shadow: 0 0 0 20px rgba(255,255,255,0); } 100% { box-shadow: 0 0 0 0 transparent; } }
+
+        /* Fullscreen Image Lightbox */
+        #image-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 9999; align-items: center; justify-content: center; flex-direction: column; }
+        #close-modal { position: absolute; top: 25px; right: 40px; color: #fff; font-size: 40px; cursor: pointer; transition: 0.2s; line-height: 1; font-weight: 300; }
+        #close-modal:hover { color: #da373c; transform: scale(1.1); }
+        #modal-img { max-width: 90%; max-height: 75vh; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); object-fit: contain; }
+        .download-btn { margin-top: 25px; padding: 12px 28px; background: #23a559; color: #fff; text-decoration: none; border-radius: 10px; font-weight: 600; font-size: 15px; transition: 0.2s; font-family: 'Inter', sans-serif; display: inline-flex; align-items: center; gap: 8px; }
+        .download-btn:hover { background: #1c8547; transform: translateY(-1px); }
+        .download-btn:active { transform: scale(0.98); }
     </style>
 </head>
 <body>
+    <div id="image-modal">
+        <span id="close-modal">&times;</span>
+        <img id="modal-img" src="">
+        <a id="modal-download" href="#" class="download-btn" download="shared-image.png">⬇️ Download Image</a>
+    </div>
+
     <div id="login-screen">
         <h1>🚀 Super Mesh Chat</h1>
         <p style="color:#949ba4; margin-top: 0; margin-bottom: 25px; font-weight: 500;">Multi-User Conference Room</p>
@@ -124,6 +140,21 @@
         // Soundboard globals
         const soundboard = {};
         let waitingForKeyBind = null;
+
+        // Image Viewer Lightbox Logic
+        const imageModal = $('image-modal');
+        const modalImg = $('modal-img');
+        const modalDownload = $('modal-download');
+        
+        $('close-modal').onclick = () => imageModal.style.display = 'none';
+        imageModal.onclick = (e) => { if(e.target === imageModal) imageModal.style.display = 'none'; };
+        
+        function openImageViewer(src, filename) {
+            modalImg.src = src;
+            modalDownload.href = src;
+            modalDownload.download = filename || "shared-image.png";
+            imageModal.style.display = 'flex';
+        }
 
         const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
         $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
@@ -199,7 +230,7 @@
                     tr.chunks.push(data.data); tr.received += data.data.byteLength;
                     if (tr.received >= tr.meta.size) {
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
-                        if(tr.meta.fileType.startsWith('image/')) addMessage(`<img src="${url}">`, peerNames[sid], 'theirs');
+                        if(tr.meta.fileType.startsWith('image/')) addMessage(`<img src="${url}" data-filename="${tr.meta.name}">`, peerNames[sid], 'theirs');
                         else addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" style="color:#23a559; display:block; margin-top:8px;">Download</a>`, peerNames[sid], 'theirs');
                         delete fileTransfers[sid];
                     }
@@ -283,11 +314,12 @@
         $('send-btn').onclick = () => { const t = $('msg-input').value; if(!t||!Object.keys(connections).length) return; bcast({type:'text',value:t}); addMessage(linkify(escapeHTML(t)), "You", 'mine'); $('msg-input').value = ""; };
         $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
 
-        // --- File Sharing Logic (Refactored to support pasting) ---
+        // --- File Sharing Logic ---
         async function sendFile(file) {
             if (!file || !Object.keys(connections).length) return;
-            addSystemMsg(`Sending ${file.name || 'file'}...`); 
-            bcast({ type: 'file-meta', name: file.name || 'pasted-image.png', fileType: file.type, size: file.size });
+            const filename = file.name || `Pasted Image - ${new Date().toLocaleTimeString()}.png`;
+            addSystemMsg(`Sending ${filename}...`); 
+            bcast({ type: 'file-meta', name: filename, fileType: file.type, size: file.size });
             
             let offset = 0;
             while (offset < file.size) {
@@ -297,7 +329,7 @@
             }
             
             const url = URL.createObjectURL(file);
-            file.type.startsWith('image/') ? addMessage(`<img src="${url}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${file.name || 'file'}</div>`, "You", 'mine');
+            file.type.startsWith('image/') ? addMessage(`<img src="${url}" data-filename="${filename}">`, "You", 'mine') : addMessage(`<div>📂 Shared: ${filename}</div>`, "You", 'mine');
         }
 
         $('file-input').onchange = () => {
@@ -309,7 +341,6 @@
             if (e.clipboardData && e.clipboardData.files.length > 0) {
                 const file = e.clipboardData.files[0];
                 if (file.type.startsWith('image/')) {
-                    // Re-wrap pasted file to give it a generic default name
                     const pastedFile = new File([file], `Pasted Image - ${new Date().toLocaleTimeString()}.png`, { type: file.type });
                     sendFile(pastedFile);
                 }
@@ -370,8 +401,31 @@
         $('mute-btn').onclick = () => { if(!localStream) return; isMuted = !isMuted; localStream.getAudioTracks()[0].enabled = !isMuted; $('mute-btn').innerHTML = isMuted?"🔇":"🎤"; $('mute-btn').classList.toggle('active', isMuted); };
         $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
 
-        function addMessage(html, user, type) { const d = document.createElement('div'); d.className = `msg ${type}`; d.innerHTML = `<div class="msg-info">${user}</div><div>${html}</div>`; $('messages').appendChild(d); $('messages').scrollTop = $('messages').scrollHeight; }
-        function addSystemMsg(txt) { const d = document.createElement('div'); d.style.cssText = "text-align:center;font-size:12px;font-weight:500;color:#949ba4;margin:10px 0"; d.innerHTML = txt; $('messages').appendChild(d); }
+        // --- Improved Add Message (with Image Binding & Robust Auto-scroll) ---
+        function addMessage(html, user, type) { 
+            const d = document.createElement('div'); 
+            d.className = `msg ${type}`; 
+            d.innerHTML = `<div class="msg-info">${user}</div><div>${html}</div>`; 
+            $('messages').appendChild(d); 
+            
+            const scrollToBottom = () => $('messages').scrollTop = $('messages').scrollHeight;
+            scrollToBottom(); // Scroll instantly for text
+
+            // Find images, attach viewer, and ensure scroll updates AFTER image finishes loading
+            const imgs = d.querySelectorAll('img');
+            imgs.forEach(img => {
+                img.onload = scrollToBottom; 
+                img.onclick = () => openImageViewer(img.src, img.getAttribute('data-filename'));
+            });
+        }
+        
+        function addSystemMsg(txt) { 
+            const d = document.createElement('div'); 
+            d.style.cssText = "text-align:center;font-size:12px;font-weight:500;color:#949ba4;margin:10px 0"; 
+            d.innerHTML = txt; 
+            $('messages').appendChild(d);
+            $('messages').scrollTop = $('messages').scrollHeight;
+        }
 
         function addUserToSidebar(name, id) {
             if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
