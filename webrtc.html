@@ -162,27 +162,41 @@
         const typingUsers = new Set();
         let tempPeer = null;
 
-        // Fetch Online Users before login
+        // Fetch Online Users before login (polling every 3 seconds)
         window.addEventListener('DOMContentLoaded', () => {
             tempPeer = new Peer(peerConfig);
-            tempPeer.on('open', () => {
+            
+            const doCheck = () => {
+                if(!tempPeer || tempPeer.destroyed || tempPeer.disconnected) return;
                 const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true } });
+                let gotResp = false;
+                
                 pConn.on('open', () => { pConn.send({ type: 'get-count' }); });
                 pConn.on('data', d => {
                     if (d.type === 'count-resp') {
+                        gotResp = true;
                         const count = d.count;
-                        $('online-users').innerText = `🟢 ${count} User${count > 1 ? 's' : ''} Online`;
-                        setTimeout(() => tempPeer.destroy(), 100);
+                        $('online-users').innerText = `🟢 ${count} User${count !== 1 ? 's' : ''} Online`;
+                        setTimeout(() => pConn.close(), 100);
                     }
                 });
                 pConn.on('error', () => {
-                    $('online-users').innerText = "⚪ Room is empty (Be the host!)";
-                    tempPeer.destroy();
+                    if(!gotResp) $('online-users').innerText = "🟢 0 Users Online";
                 });
-                setTimeout(() => { if(!tempPeer.destroyed) { $('online-users').innerText = "⚪ Room is empty (Be the host!)"; tempPeer.destroy(); } }, 4000);
+                setTimeout(() => { 
+                    if(!gotResp) {
+                        $('online-users').innerText = "🟢 0 Users Online"; 
+                        if (pConn) pConn.close();
+                    }
+                }, 2000);
+            };
+
+            tempPeer.on('open', () => {
+                doCheck();
+                window.loginPingInterval = setInterval(doCheck, 3000);
             });
             tempPeer.on('error', () => {
-                $('online-users').innerText = "⚪ Room is empty (Be the host!)";
+                $('online-users').innerText = "🟢 0 Users Online";
             });
         });
 
@@ -192,7 +206,9 @@
         const linkify = s => s.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank">${url}</a>`);
 
         $('join-btn').onclick = async () => {
+            if (window.loginPingInterval) clearInterval(window.loginPingInterval);
             if (tempPeer && !tempPeer.destroyed) { tempPeer.destroy(); }
+            
             myName = $('username').value.trim() || "Anon";
             if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
             
