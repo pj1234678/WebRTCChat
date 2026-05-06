@@ -272,7 +272,13 @@
             conn.open ? setup() : conn.on('open', setup);
             conn.on('data', data => {
                 const sid = conn.peer; lastSeen[sid] = Date.now();
-                if (data.type === 'name') { peerNames[sid] = data.value; addUserToSidebar(data.value, sid); addSystemMsg(`<b>${data.value}</b> joined.`); playJoinSound(); }
+                if (data.type === 'name') {
+                    const safeName = escapeHTML(data.value);
+                    peerNames[sid] = safeName;
+                    addUserToSidebar(safeName, sid);
+                    addSystemMsg(`<b>${safeName}</b> joined.`);
+                    playJoinSound();
+                }
                 else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
                 else if (data.type === 'text') addMessage(linkify(escapeHTML(data.value)), peerNames[sid] || "Unknown", 'theirs');
                 else if (data.type === 'typing') { 
