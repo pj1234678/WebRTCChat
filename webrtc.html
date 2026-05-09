@@ -211,6 +211,11 @@
             myName = $('username').value.trim() || "Anon";
             if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
             
+            // Request Notification Permission
+            if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
+                Notification.requestPermission();
+            }
+
             try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); } 
             catch(err) { /* Mic not available */ }
             
@@ -229,6 +234,12 @@
 
             initPeerJS();
         };
+
+        function notifyUser(title, body) {
+            if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
+                new Notification(title, { body: body });
+            }
+        }
 
         function initPeerJS() {
             $('searching-container').style.display = 'flex';
@@ -285,7 +296,12 @@
                     playJoinSound();
                 }
                 else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
-                else if (data.type === 'text') addMessage(linkify(escapeHTML(data.value)), peerNames[sid] || "Unknown", 'theirs');
+                else if (data.type === 'text') {
+                    const senderName = peerNames[sid] || "Unknown";
+                    addMessage(linkify(escapeHTML(data.value)), senderName, 'theirs');
+                    playJoinSound();
+                    notifyUser(`New message from ${senderName}`, data.value);
+                }
                 else if (data.type === 'typing') { 
                     const uname = peerNames[sid] || "Someone"; 
                     data.state ? typingUsers.add(uname) : typingUsers.delete(uname); 
@@ -308,16 +324,20 @@
                     tr.chunks.push(data.data); tr.received += data.data.byteLength;
                     if (tr.received >= tr.meta.size) {
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
-                        
+                        const senderName = peerNames[sid] || "Someone";
+
                         if (tr.meta.fileType.startsWith('image/')) {
-                            addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
                         } else if (tr.meta.fileType.startsWith('video/')) {
-                            addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
                         } else if (tr.meta.fileType.startsWith('audio/')) {
-                            addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
                         } else {
-                            addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, peerNames[sid], 'theirs');
+                            addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
                         }
+
+                        playJoinSound();
+                        notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
                         delete fileTransfers[sid];
                     }
                 }
