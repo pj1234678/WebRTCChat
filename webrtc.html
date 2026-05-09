@@ -247,7 +247,8 @@
             peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
             peer.on('open', id => {
                 myId = id; isHost = true; $('conn-status').innerText = "Host Ready"; $('conn-status').style.color = "#23a559";
-                addSystemMsg(`You created the room as <b>${myName}</b>`); addUserToSidebar(myName, "me"); enableChat();
+                const safeMyName = escapeHTML(myName);
+                addSystemMsg(`You created the room as <b>${safeMyName}</b>`); addUserToSidebar(safeMyName, "me"); enableChat();
             });
             peer.on('error', err => {
                 if (err.type === 'unavailable-id') {
@@ -255,7 +256,8 @@
                     peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
                     peer.on('open', id => {
                         myId = id; isHost = false; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
-                        addSystemMsg(`You joined as <b>${myName}</b>`); addUserToSidebar(myName, "me"); connectToPeer(ROOM_ID); enableChat();
+                        const safeMyName = escapeHTML(myName);
+                        addSystemMsg(`You joined as <b>${safeMyName}</b>`); addUserToSidebar(safeMyName, "me"); connectToPeer(ROOM_ID); enableChat();
                     });
                 }
             });
