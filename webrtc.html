@@ -51,6 +51,13 @@
         .progress-container { width: 100%; height: 6px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden; margin-top: 10px; border: 1px solid rgba(255,255,255,0.1); }
         .progress-bar { height: 100%; background: #23a559; width: 0%; transition: width 0.1s linear; }
 
+        /* File Transfer Action Buttons */
+        .tx-btn { font-family: 'Inter', sans-serif; border: none; background: #4f545c; color: white; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: 0.2s; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; height: 28px; outline: none; }
+        .tx-btn:hover { background: #686d73; transform: translateY(-1px); }
+        .tx-btn:active { transform: scale(0.95); }
+        .tx-btn-danger { background: #da373c; }
+        .tx-btn-danger:hover { background: #a1282c; }
+
         /* Modern Download Button Styling */
         .chat-media-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: rgba(255, 255, 255, 0.15); color: #fff !important; text-decoration: none; font-size: 13px; font-weight: 600; transition: 0.2s; }
         .chat-media-link:hover { background: rgba(255, 255, 255, 0.25); transform: translateY(-1px); }
@@ -184,8 +191,49 @@
         const typingUsers = new Set();
         let tempPeer = null;
 
+        // --- File Control State Variables ---
+        const activeTransfers = { tx: {} };
+
+        // Expose to window so onclick handlers in injected HTML can trigger them
+        window.toggleTx = (txId) => {
+            const tx = activeTransfers.tx[txId];
+            if (tx) {
+                tx.paused = !tx.paused;
+                const btn = $(`pause-${txId}`);
+                if (btn) btn.innerHTML = tx.paused ? "▶️ Resume" : "⏸️ Pause";
+                bcast({ type: 'file-control', txId, action: tx.paused ? 'pause' : 'resume' });
+            }
+        };
+
+        window.cancelTx = (txId) => {
+            const tx = activeTransfers.tx[txId];
+            if (tx) {
+                tx.canceled = true;
+                bcast({ type: 'file-control', txId, action: 'cancel' });
+                const msgNode = $(`msg-${txId}`);
+                if (msgNode) msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Canceled</div>`;
+            }
+        };
+
+        window.toggleRx = (txId, sid) => {
+            const tr = fileTransfers[txId];
+            const conn = connections[sid];
+            if (tr && conn && conn.open) {
+                tr.paused = !tr.paused;
+                const btn = $(`pause-rx-${txId}`);
+                if (btn) btn.innerHTML = tr.paused ? "▶️ Resume" : "⏸️ Pause";
+                conn.send({ type: 'file-control-rx', txId, action: tr.paused ? 'pause' : 'resume' });
+            }
+        };
+
+        window.cancelRx = (txId, sid) => {
+            delete fileTransfers[txId];
+            const msgNode = $(`msg-rx-${txId}`);
+            if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Download Canceled</div>`;
+        };
+
         // --- Cursor FX Variables & Logic ---
-        let currentFx = 0; // 0=None, 1=Fairy, 2=Ghost, 3=Rainbow
+        let currentFx = 0; 
         const fxIcons = ['✨', '🧚', '👻', '🌈'];
         const fxNames = ['None', 'Fairy Dust', 'Ghost', 'Rainbow'];
         let fxHue = 0;
@@ -201,24 +249,23 @@
         document.addEventListener('mousemove', e => {
             if (currentFx === 0 || $('login-screen').style.display !== 'none') return;
             const now = Date.now();
-            if (now - lastFxTime < 30) return; // limit spawn rate
+            if (now - lastFxTime < 30) return; 
             lastFxTime = now;
 
             const p = document.createElement('div');
             p.className = 'fx-part';
-            // Center the particle slightly relative to the cursor
             p.style.left = (e.clientX - 10) + 'px';
             p.style.top = (e.clientY - 10) + 'px';
 
-            if (currentFx === 1) { // Fairy Dust
+            if (currentFx === 1) { 
                 p.innerText = '✨';
                 p.style.fontSize = (Math.random() * 12 + 8) + 'px';
                 p.style.animation = 'fxFall 0.8s forwards';
-            } else if (currentFx === 2) { // Ghost
+            } else if (currentFx === 2) { 
                 p.innerText = '👻';
                 p.style.fontSize = '20px';
                 p.style.animation = 'fxFloat 0.8s forwards';
-            } else if (currentFx === 3) { // Rainbow
+            } else if (currentFx === 3) { 
                 p.style.width = '14px';
                 p.style.height = '14px';
                 p.style.borderRadius = '50%';
@@ -232,7 +279,6 @@
             setTimeout(() => p.remove(), 1000);
         });
 
-        // Fetch Online Users before login (polling every 3 seconds)
         window.addEventListener('DOMContentLoaded', () => {
             tempPeer = new Peer(peerConfig);
             
@@ -269,7 +315,6 @@
                 $('online-users').innerText = "🟢 0 Users Online";
             });
             
-            // Image click Fullscreen functionality
             $('messages').addEventListener('click', (e) => {
                 if (e.target.tagName === 'IMG') {
                     if (e.target.requestFullscreen) {
@@ -402,21 +447,50 @@
                     const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
                     addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
                 }
+                else if (data.type === 'file-control') {
+                    const tr = fileTransfers[data.txId];
+                    if (!tr && data.action !== 'cancel') return;
+                    
+                    if (data.action === 'pause') {
+                        const btn = $(`pause-rx-${data.txId}`);
+                        if (btn) { btn.innerHTML = "▶️ Resume"; tr.paused = true; }
+                    } else if (data.action === 'resume') {
+                        const btn = $(`pause-rx-${data.txId}`);
+                        if (btn) { btn.innerHTML = "⏸️ Pause"; tr.paused = false; }
+                    } else if (data.action === 'cancel') {
+                        delete fileTransfers[data.txId];
+                        const msgNode = $(`msg-rx-${data.txId}`);
+                        if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
+                    }
+                }
+                else if (data.type === 'file-control-rx') {
+                    const tx = activeTransfers.tx[data.txId];
+                    if (tx) {
+                        if (data.action === 'pause' && !tx.paused) window.toggleTx(data.txId);
+                        else if (data.action === 'resume' && tx.paused) window.toggleTx(data.txId);
+                    }
+                }
                 else if (data.type === 'file-meta') { 
-                    fileTransfers[sid] = { meta: data, chunks: [], received: 0 }; 
-                    const rxId = `rx-${sid}`;
-                    const progHtml = `<div>📥 Downloading <b>${data.name}</b>...</div><div class="progress-container"><div class="progress-bar" id="bar-${rxId}"></div></div>`;
-                    addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-${rxId}`);
+                    const txId = data.txId;
+                    fileTransfers[txId] = { meta: data, chunks: [], received: 0, senderId: sid, paused: false }; 
+                    const progHtml = `
+                    <div>📥 Downloading <b>${data.name}</b>...</div>
+                    <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
+                    <div style="margin-top: 8px; display: flex; gap: 8px;">
+                        <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
+                        <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
+                    </div>`;
+                    addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
                 }
                 else if (data.type === 'file-chunk') {
-                    const tr = fileTransfers[sid]; if(!tr) return;
+                    const tr = fileTransfers[data.txId]; if(!tr) return;
                     tr.chunks.push(data.data); tr.received += data.data.byteLength;
                     
-                    const bar = $(`bar-rx-${sid}`);
+                    const bar = $(`bar-rx-${data.txId}`);
                     if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
 
                     if (tr.received >= tr.meta.size) {
-                        const msgNode = $(`msg-rx-${sid}`);
+                        const msgNode = $(`msg-rx-${data.txId}`);
                         if (msgNode) msgNode.remove();
 
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
@@ -434,7 +508,7 @@
 
                         playJoinSound();
                         notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
-                        delete fileTransfers[sid];
+                        delete fileTransfers[data.txId];
                     }
                 }
             });
@@ -469,11 +543,14 @@
             
             if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
 
-            // --- FAILED TRANSFER FIX (Receiving Side) ---
-            if (fileTransfers[id]) {
-                const msgNode = $(`msg-rx-${id}`);
-                if (msgNode) {
-                    msgNode.innerHTML = `<div class="msg-info">${uname}</div><div style="color: #da373c;">❌ Download Failed: User disconnected</div>`;
+            // Clean up any incomplete receiving transfers linked to this dropped user
+            for (let tid in fileTransfers) {
+                if (fileTransfers[tid].senderId === id) {
+                    const msgNode = $(`msg-rx-${tid}`);
+                    if (msgNode) {
+                        msgNode.innerHTML = `<div class="msg-info">${uname}</div><div style="color: #da373c;">❌ Download Failed: User disconnected</div>`;
+                    }
+                    delete fileTransfers[tid];
                 }
             }
 
@@ -482,7 +559,7 @@
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
             $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
             
-            delete connections[id]; delete peerNames[id]; delete fileTransfers[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
+            delete connections[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
             
             if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
             if (!Object.keys(connections).length) $('searching-container').style.display = 'flex';
@@ -570,7 +647,6 @@
             }
         }
 
-        // --- Drag & Drop & File Sharing Logic ---
         let dragCounter = 0;
         const dropOverlay = $('drop-overlay');
 
@@ -623,27 +699,47 @@
                 return addSystemMsg("❌ No one is in the room to receive files!");
             }
             const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
-            bcast({ type: 'file-meta', name: filename, fileType: file.type, size: file.size });
+            const txId = 'tx-' + Date.now() + '-' + Math.floor(Math.random()*1000);
             
-            const txId = 'tx-' + Date.now();
-            const progHtml = `<div>📤 Uploading <b>${filename}</b>...</div><div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>`;
+            // Register Sender Tx Block
+            activeTransfers.tx[txId] = { paused: false, canceled: false };
+
+            bcast({ type: 'file-meta', txId: txId, name: filename, fileType: file.type, size: file.size });
+            
+            const progHtml = `
+            <div>📤 Uploading <b>${filename}</b>...</div>
+            <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
+            <div style="margin-top: 8px; display: flex; gap: 8px;">
+                <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
+                <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
+            </div>`;
             addMessage(progHtml, "You", 'mine', `msg-${txId}`);
 
             let offset = 0;
             let chunkCount = 0;
             while (offset < file.size) {
-                // --- FAILED TRANSFER FIX (Sending Side) ---
+                // Break if user clicks Cancel
+                if (activeTransfers.tx[txId].canceled) return;
+
+                // Stall if user clicks Pause
+                while (activeTransfers.tx[txId].paused && !activeTransfers.tx[txId].canceled) {
+                    await new Promise(r => setTimeout(r, 100));
+                }
+
+                // Double check cancel state after coming out of pause
+                if (activeTransfers.tx[txId].canceled) return;
+
                 if (Object.keys(connections).length === 0) {
                     const msgNode = $(`msg-${txId}`);
                     if (msgNode) {
                         msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Failed: Everyone left the room</div>`;
                     }
-                    return; // Stop reading the file
+                    return; 
                 }
 
                 const chunk = file.slice(offset, offset + 16384), buffer = await chunk.arrayBuffer();
                 for (let c of Object.values(connections)) if (c.open && c.dataChannel) while (c.dataChannel.bufferedAmount > 1048576) await new Promise(r => setTimeout(r, 50));
-                bcast({ type: 'file-chunk', data: buffer }); 
+                bcast({ type: 'file-chunk', txId: txId, data: buffer }); 
                 offset += 16384;
                 chunkCount++;
 
@@ -653,19 +749,24 @@
                 if (chunkCount % 5 === 0) await new Promise(r => setTimeout(r, 0));
             }
             
-            const msgNode = $(`msg-${txId}`);
-            if (msgNode) msgNode.remove();
+            // Output Media on Completion
+            if (!activeTransfers.tx[txId].canceled) {
+                const msgNode = $(`msg-${txId}`);
+                if (msgNode) msgNode.remove();
 
-            const url = URL.createObjectURL(file);
-            if (file.type.startsWith('image/')) {
-                addMessage(`<img src="${url}"><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
-            } else if (file.type.startsWith('video/')) {
-                addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Video</a>`, "You", 'mine');
-            } else if (file.type.startsWith('audio/')) {
-                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
-            } else {
-                addMessage(`<div>📂 Shared: ${filename}</div><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download File</a>`, "You", 'mine');
+                const url = URL.createObjectURL(file);
+                if (file.type.startsWith('image/')) {
+                    addMessage(`<img src="${url}"><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
+                } else if (file.type.startsWith('video/')) {
+                    addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Video</a>`, "You", 'mine');
+                } else if (file.type.startsWith('audio/')) {
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
+                } else {
+                    addMessage(`<div>📂 Shared: ${filename}</div><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download File</a>`, "You", 'mine');
+                }
             }
+
+            delete activeTransfers.tx[txId];
         }
 
         $('file-input').onchange = () => {
@@ -684,7 +785,6 @@
             }
         });
 
-        // --- Soundboard Logic ---
         $('soundboard-input').onchange = async (e) => {
             const file = e.target.files[0];
             if (!file) return;
@@ -757,8 +857,6 @@
             } catch (err) {}
         }
 
-
-        // --- SPLIT NETWORK/UI LOOPS FOR SMOOTH DISCONNECT ---
 
         setInterval(() => {
             if (isHost) { const peers = Object.keys(connections); if(peers.length) bcast({ type: 'mesh-sync', peers }); }
