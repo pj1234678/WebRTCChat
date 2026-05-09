@@ -469,6 +469,14 @@
             
             if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
 
+            // --- FAILED TRANSFER FIX (Receiving Side) ---
+            if (fileTransfers[id]) {
+                const msgNode = $(`msg-rx-${id}`);
+                if (msgNode) {
+                    msgNode.innerHTML = `<div class="msg-info">${uname}</div><div style="color: #da373c;">❌ Download Failed: User disconnected</div>`;
+                }
+            }
+
             ['', '-cam'].forEach(ext => { $(`video-${id}${ext}`)?.remove(); });
             if (screenCalls[id]) { screenCalls[id].close(); delete screenCalls[id]; }
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
@@ -624,6 +632,15 @@
             let offset = 0;
             let chunkCount = 0;
             while (offset < file.size) {
+                // --- FAILED TRANSFER FIX (Sending Side) ---
+                if (Object.keys(connections).length === 0) {
+                    const msgNode = $(`msg-${txId}`);
+                    if (msgNode) {
+                        msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Failed: Everyone left the room</div>`;
+                    }
+                    return; // Stop reading the file
+                }
+
                 const chunk = file.slice(offset, offset + 16384), buffer = await chunk.arrayBuffer();
                 for (let c of Object.values(connections)) if (c.open && c.dataChannel) while (c.dataChannel.bufferedAmount > 1048576) await new Promise(r => setTimeout(r, 50));
                 bcast({ type: 'file-chunk', data: buffer }); 
@@ -783,7 +800,6 @@
         function enableChat() { $('msg-input').disabled = $('send-btn').disabled = false; }
         $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
 
-        // --- Improved Add Message (Now accepts optional msgId for dynamic updates) ---
         function addMessage(html, user, type, msgId = null) { 
             const d = document.createElement('div'); 
             d.className = `msg ${type}`; 
