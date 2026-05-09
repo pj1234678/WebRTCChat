@@ -40,8 +40,13 @@
         .msg img, .msg video { display: block; max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
         .msg video { background: #000; outline: none; }
         .msg audio { display: block; max-width: 260px; outline: none; margin-top: 8px; height: 40px; }
+        .msg img { cursor: pointer; } /* Added pointer to show images are clickable */
         .msg img:hover, .msg video:hover { transform: scale(1.02); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
         
+        /* File Progress Bar Styling */
+        .progress-container { width: 100%; height: 6px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden; margin-top: 10px; border: 1px solid rgba(255,255,255,0.1); }
+        .progress-bar { height: 100%; background: #23a559; width: 0%; transition: width 0.1s linear; }
+
         /* Modern Download Button Styling */
         .chat-media-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: rgba(255, 255, 255, 0.15); color: #fff !important; text-decoration: none; font-size: 13px; font-weight: 600; transition: 0.2s; }
         .chat-media-link:hover { background: rgba(255, 255, 255, 0.25); transform: translateY(-1px); }
@@ -71,7 +76,7 @@
         .user-item:hover { border-color: #383a40; background: #313338; }
         .user-left { display: flex; align-items: center; gap: 10px; flex: 1; overflow: hidden; white-space: nowrap; color: #dbdee1; }
         
-        /* UPDATED: Status Dot Styling */
+        /* Status Dot Styling */
         .status-dot { width: 10px; height: 10px; border-radius: 50%; transition: 0.3s ease; }
         .dot-good { background: #23a559; box-shadow: 0 0 8px rgba(35,165,89,0.4); }
         .dot-med { background: #f0b232; box-shadow: 0 0 8px rgba(240,178,50,0.4); }
@@ -153,7 +158,6 @@
         let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         
-        // Added lastRealPing dictionary
         const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
@@ -203,6 +207,17 @@
             });
             tempPeer.on('error', () => {
                 $('online-users').innerText = "🟢 0 Users Online";
+            });
+            
+            // Image click Fullscreen functionality
+            $('messages').addEventListener('click', (e) => {
+                if (e.target.tagName === 'IMG') {
+                    if (e.target.requestFullscreen) {
+                        e.target.requestFullscreen();
+                    } else if (e.target.webkitRequestFullscreen) {
+                        e.target.webkitRequestFullscreen();
+                    }
+                }
             });
         });
 
@@ -318,7 +333,6 @@
                 }
                 else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
                 else if (data.type === 'pong') {
-                    // Update actual ping map
                     const lat = Date.now() - data.time;
                     lastRealPing[sid] = lat;
                     updatePingUI(sid, lat);
@@ -331,12 +345,21 @@
                 }
                 else if (data.type === 'file-meta') { 
                     fileTransfers[sid] = { meta: data, chunks: [], received: 0 }; 
-                    addSystemMsg(`📥 Receiving <b>${data.name}</b>...`);
+                    const rxId = `rx-${sid}`;
+                    const progHtml = `<div>📥 Downloading <b>${data.name}</b>...</div><div class="progress-container"><div class="progress-bar" id="bar-${rxId}"></div></div>`;
+                    addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-${rxId}`);
                 }
                 else if (data.type === 'file-chunk') {
                     const tr = fileTransfers[sid]; if(!tr) return;
                     tr.chunks.push(data.data); tr.received += data.data.byteLength;
+                    
+                    const bar = $(`bar-rx-${sid}`);
+                    if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
+
                     if (tr.received >= tr.meta.size) {
+                        const msgNode = $(`msg-rx-${sid}`);
+                        if (msgNode) msgNode.remove();
+
                         const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
                         const senderName = peerNames[sid] || "Someone";
 
@@ -392,7 +415,6 @@
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
             $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
             
-            // Clean up state tracking
             delete connections[id]; delete peerNames[id]; delete fileTransfers[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
             
             if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
@@ -512,7 +534,6 @@
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                 const file = e.dataTransfer.files[0];
                 
-                // If audio, play instantly to chat
                 if (file.type.startsWith('audio/')) {
                     if (Object.keys(connections).length === 0) {
                         return addSystemMsg("❌ No one is in the room to hear sounds!");
@@ -524,7 +545,6 @@
                     addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${file.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                     bcast({ type: 'play-sound', buffer: buffer, mime: file.type, name: file.name });
                 } else {
-                    // Else, send as shared file, photo, or video
                     sendFile(file);
                 }
             }
@@ -536,16 +556,31 @@
                 return addSystemMsg("❌ No one is in the room to receive files!");
             }
             const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
-            addSystemMsg(`Sending ${filename}...`); 
             bcast({ type: 'file-meta', name: filename, fileType: file.type, size: file.size });
             
+            const txId = 'tx-' + Date.now();
+            const progHtml = `<div>📤 Uploading <b>${filename}</b>...</div><div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>`;
+            addMessage(progHtml, "You", 'mine', `msg-${txId}`);
+
             let offset = 0;
+            let chunkCount = 0;
             while (offset < file.size) {
                 const chunk = file.slice(offset, offset + 16384), buffer = await chunk.arrayBuffer();
                 for (let c of Object.values(connections)) if (c.open && c.dataChannel) while (c.dataChannel.bufferedAmount > 1048576) await new Promise(r => setTimeout(r, 50));
-                bcast({ type: 'file-chunk', data: buffer }); offset += 16384;
+                bcast({ type: 'file-chunk', data: buffer }); 
+                offset += 16384;
+                chunkCount++;
+
+                const bar = $(`bar-${txId}`);
+                if (bar) bar.style.width = `${Math.min((offset / file.size) * 100, 100)}%`;
+
+                // Yield occasionally to ensure the UI updates smoothly without blocking
+                if (chunkCount % 5 === 0) await new Promise(r => setTimeout(r, 0));
             }
             
+            const msgNode = $(`msg-${txId}`);
+            if (msgNode) msgNode.remove();
+
             const url = URL.createObjectURL(file);
             if (file.type.startsWith('image/')) {
                 addMessage(`<img src="${url}"><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
@@ -628,7 +663,6 @@
                         audio.volume = parseFloat(volSlider.value);
                     }
                     
-                    // Check if sender is currently muted
                     const muteIcon = $(`mute-icon-${senderId}`);
                     if (muteIcon && muteIcon.innerText === "🔇") {
                         audio.muted = true;
@@ -640,7 +674,7 @@
 
                 audio.play().catch(err => console.log("Sound play prevented:", err));
                 audio.onended = () => {
-                    URL.revokeObjectURL(url); // Cleanup memory
+                    URL.revokeObjectURL(url); 
                     if (senderId && activeSounds[senderId]) {
                         activeSounds[senderId] = activeSounds[senderId].filter(a => a !== audio);
                     }
@@ -651,30 +685,23 @@
 
         // --- SPLIT NETWORK/UI LOOPS FOR SMOOTH DISCONNECT ---
 
-        // 1. Mesh Sync Loop (every 3 seconds)
         setInterval(() => {
             if (isHost) { const peers = Object.keys(connections); if(peers.length) bcast({ type: 'mesh-sync', peers }); }
             else if (!connections[ROOM_ID]) connectToPeer(ROOM_ID);
         }, 3000);
 
-        // 2. Ping Network Loop (every 1 second)
         setInterval(() => {
             bcast({ type: 'ping', time: Date.now() });
         }, 1000);
 
-        // 3. UI Monitoring & Disconnect Loop (every 100ms for smooth visual updates)
         setInterval(() => {
             const now = Date.now();
             Object.keys(connections).forEach(id => {
                 const elapsed = now - (lastSeen[id] || now);
                 
                 if (elapsed > 10000) {
-                    // Time's up! Kick them out
                     removePeer(id);
                 } else if (elapsed > 1000) {
-                    // It's been over 1 second since we heard from them. They missed a ping!
-                    // Artificially start incrementing their last known ping to match the elapsed time 
-                    // so the UI visibly transitions through Yellow -> Red!
                     const basePing = lastRealPing[id] || 0;
                     const simulatedPing = Math.floor(basePing + (elapsed - 1000));
                     updatePingUI(id, simulatedPing);
@@ -682,7 +709,6 @@
             });
         }, 100);
 
-        // UPDATED: Sync the Orb dot color with the numeric ping label
         function updatePingUI(id, lat) { 
             const p = $(`ping-${id}`); 
             const dot = $(`status-dot-${id}`);
@@ -699,10 +725,11 @@
         function enableChat() { $('msg-input').disabled = $('send-btn').disabled = false; }
         $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
 
-        // --- Improved Add Message (with Robust Auto-scroll) ---
-        function addMessage(html, user, type) { 
+        // --- Improved Add Message (Now accepts optional msgId for dynamic updates) ---
+        function addMessage(html, user, type, msgId = null) { 
             const d = document.createElement('div'); 
             d.className = `msg ${type}`; 
+            if (msgId) d.id = msgId;
             d.innerHTML = `<div class="msg-info">${user}</div><div>${html}</div>`; 
             $('messages').appendChild(d); 
             
@@ -723,7 +750,6 @@
             $('messages').scrollTop = $('messages').scrollHeight;
         }
 
-        // UPDATED: Inject an ID into the status orb so we can change it dynamically
         function addUserToSidebar(name, id) {
             if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
             const d = document.createElement('div'); d.className = 'user-item'; d.id = `sidebar-${id}`;
@@ -741,7 +767,7 @@
             if (id === "me") {
                 const myMicToggle = $('my-mic-toggle');
                 if (!localStream) {
-                    myMicToggle.style.display = 'none'; // Hide if no mic was granted
+                    myMicToggle.style.display = 'none'; 
                 } else {
                     myMicToggle.onclick = () => {
                         isMuted = !isMuted;
@@ -756,7 +782,6 @@
                 let isUserMuted = false;
                 let previousVolume = 1;
 
-                // Mute icon click logic
                 muteIcon.onclick = () => {
                     isUserMuted = !isUserMuted;
                     muteIcon.innerText = isUserMuted ? "🔇" : "🔊";
@@ -776,7 +801,6 @@
                     }
                 };
 
-                // Volume slider logic
                 volSlider.addEventListener('input', e => { 
                     const vol = parseFloat(e.target.value);
                     const a = $(`audio-${id}`); 
@@ -786,7 +810,6 @@
                         activeSounds[id].forEach(snd => snd.volume = vol);
                     }
 
-                    // Auto-mute if dragged to 0
                     if (vol === 0 && !isUserMuted) {
                         isUserMuted = true;
                         muteIcon.innerText = "🔇";
@@ -794,7 +817,6 @@
                         if (a) a.muted = true;
                         if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = true);
                     } 
-                    // Auto-unmute if dragged above 0 while muted
                     else if (isUserMuted && vol > 0) {
                         isUserMuted = false;
                         muteIcon.innerText = "🔊";
