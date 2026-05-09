@@ -148,7 +148,7 @@
 
         let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
-        const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {};
+        const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
         // Clean SVG Download Icon
@@ -289,7 +289,7 @@
                 else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
                 else if (data.type === 'pong') updatePingUI(sid, Date.now() - data.time);
                 else if (data.type === 'play-sound') { 
-                    playCustomSound(data.buffer, data.mime); 
+                    playCustomSound(data.buffer, data.mime, sid); 
                     addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
                     const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
                     addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
@@ -474,7 +474,7 @@
                     }
                     addSystemMsg(`Playing <b>${file.name}</b> to the room...`);
                     const buffer = await file.arrayBuffer();
-                    playCustomSound(buffer, file.type);
+                    playCustomSound(buffer, file.type, null);
                     const url = URL.createObjectURL(new Blob([buffer], { type: file.type }));
                     addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${file.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                     bcast({ type: 'play-sound', buffer: buffer, mime: file.type, name: file.name });
@@ -564,20 +564,38 @@
                 if (Object.keys(connections).length === 0) {
                     return addSystemMsg("❌ No one is in the room to hear that!");
                 }
-                playCustomSound(soundboard[num].buffer, soundboard[num].mime);
+                playCustomSound(soundboard[num].buffer, soundboard[num].mime, null);
                 const url = URL.createObjectURL(new Blob([soundboard[num].buffer], { type: soundboard[num].mime }));
                 addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${soundboard[num].name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                 bcast({ type: 'play-sound', buffer: soundboard[num].buffer, mime: soundboard[num].mime, name: soundboard[num].name });
             }
         });
 
-        function playCustomSound(buffer, mime) {
+        function playCustomSound(buffer, mime, senderId) {
             try {
                 const blob = new Blob([buffer], { type: mime });
                 const url = URL.createObjectURL(blob);
                 const audio = new Audio(url);
+                
+                // If we know who sent it, apply their volume right away
+                if (senderId) {
+                    const volSlider = $(`vol-${senderId}`);
+                    if (volSlider) {
+                        audio.volume = parseFloat(volSlider.value);
+                    }
+                    // Track this audio element so dynamic volume changes apply mid-playback
+                    if (!activeSounds[senderId]) activeSounds[senderId] = [];
+                    activeSounds[senderId].push(audio);
+                }
+
                 audio.play().catch(err => console.log("Sound play prevented:", err));
-                audio.onended = () => URL.revokeObjectURL(url); // Cleanup memory
+                audio.onended = () => {
+                    URL.revokeObjectURL(url); // Cleanup memory
+                    // Remove from active list once finished
+                    if (senderId && activeSounds[senderId]) {
+                        activeSounds[senderId] = activeSounds[senderId].filter(a => a !== audio);
+                    }
+                };
             } catch (err) {}
         }
 
@@ -624,7 +642,19 @@
             const right = id === "me" ? '' : `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span style="font-size:14px;opacity:0.8">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
             d.innerHTML = `<div class="user-left"><div class="status-dot"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
             $('user-list').appendChild(d);
-            if (id !== "me") $(`vol-${id}`).addEventListener('input', e => { const a = $(`audio-${id}`); if(a) a.volume = e.target.value; });
+            
+            if (id !== "me") {
+                $(`vol-${id}`).addEventListener('input', e => { 
+                    const vol = e.target.value;
+                    const a = $(`audio-${id}`); 
+                    if(a) a.volume = vol; 
+                    
+                    // Also adjust any currently playing soundboard clips from this user dynamically
+                    if (activeSounds[id]) {
+                        activeSounds[id].forEach(snd => snd.volume = vol);
+                    }
+                });
+            }
         }
     </script>
 </body>
