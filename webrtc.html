@@ -126,7 +126,6 @@
         <div id="typing-indicator"></div>
         
         <div class="input-bar">
-            <button id="mute-btn" class="media-btn" title="Toggle Mic">🎤</button>
             <button id="cam-btn" class="media-btn" title="Toggle Webcam">📷</button>
             <button id="screen-btn" class="media-btn" title="Share Screen">🖥️</button>
             
@@ -213,7 +212,7 @@
             if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
             
             try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); } 
-            catch(err) { $('mute-btn').style.display = 'none'; }
+            catch(err) { /* Mic not available */ }
             
             $('login-screen').style.display = 'none'; $('conn-status').innerText = "Initializing...";
             
@@ -622,7 +621,6 @@
 
         function updatePingUI(id, lat) { const p = $(`ping-${id}`); if(p){ p.innerText = `${lat}ms`; p.className = `ping-display ${lat<100?'ping-good':lat<300?'ping-med':'ping-bad'}`; } }
         function enableChat() { $('msg-input').disabled = $('send-btn').disabled = false; }
-        $('mute-btn').onclick = () => { if(!localStream) return; isMuted = !isMuted; localStream.getAudioTracks()[0].enabled = !isMuted; $('mute-btn').innerHTML = isMuted?"🔇":"🎤"; $('mute-btn').classList.toggle('active', isMuted); };
         $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
 
         // --- Improved Add Message (with Robust Auto-scroll) ---
@@ -652,13 +650,34 @@
         function addUserToSidebar(name, id) {
             if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
             const d = document.createElement('div'); d.className = 'user-item'; d.id = `sidebar-${id}`;
-            const right = id === "me" ? '' : `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="mute-icon-${id}" style="font-size:14px;opacity:0.8;cursor:pointer;user-select:none;transition:0.2s;" title="Mute/Unmute">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
+            
+            let right = "";
+            if (id === "me") {
+                right = `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="my-mic-toggle" style="font-size:14px;cursor:pointer;user-select:none;transition:0.2s;" title="Toggle Mic">🎤</span></div>`;
+            } else {
+                right = `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="mute-icon-${id}" style="font-size:14px;opacity:0.8;cursor:pointer;user-select:none;transition:0.2s;" title="Mute/Unmute">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
+            }
+
             d.innerHTML = `<div class="user-left"><div class="status-dot"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
             $('user-list').appendChild(d);
             
-            if (id !== "me") {
+            if (id === "me") {
+                const myMicToggle = $('my-mic-toggle');
+                if (!localStream) {
+                    myMicToggle.style.display = 'none'; // Hide if no mic was granted
+                } else {
+                    myMicToggle.onclick = () => {
+                        isMuted = !isMuted;
+                        localStream.getAudioTracks()[0].enabled = !isMuted;
+                        myMicToggle.innerText = isMuted ? "🔇" : "🎤";
+                        myMicToggle.style.opacity = isMuted ? "0.5" : "1";
+                    };
+                }
+            } else {
                 const muteIcon = $(`mute-icon-${id}`);
+                const volSlider = $(`vol-${id}`);
                 let isUserMuted = false;
+                let previousVolume = 1;
 
                 // Mute icon click logic
                 muteIcon.onclick = () => {
@@ -667,16 +686,22 @@
                     muteIcon.style.opacity = isUserMuted ? "0.5" : "0.8";
                     
                     const a = $(`audio-${id}`);
-                    if (a) a.muted = isUserMuted;
-                    
-                    if (activeSounds[id]) {
-                        activeSounds[id].forEach(snd => snd.muted = isUserMuted);
+
+                    if (isUserMuted) {
+                        previousVolume = parseFloat(volSlider.value) > 0 ? parseFloat(volSlider.value) : 1;
+                        volSlider.value = 0;
+                        if (a) { a.muted = true; a.volume = 0; }
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = true; snd.volume = 0; });
+                    } else {
+                        volSlider.value = previousVolume;
+                        if (a) { a.muted = false; a.volume = previousVolume; }
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = false; snd.volume = previousVolume; });
                     }
                 };
 
                 // Volume slider logic
-                $(`vol-${id}`).addEventListener('input', e => { 
-                    const vol = e.target.value;
+                volSlider.addEventListener('input', e => { 
+                    const vol = parseFloat(e.target.value);
                     const a = $(`audio-${id}`); 
                     if(a) a.volume = vol; 
                     
@@ -684,8 +709,16 @@
                         activeSounds[id].forEach(snd => snd.volume = vol);
                     }
 
-                    // Auto-unmute if they move the slider while muted
-                    if (isUserMuted && vol > 0) {
+                    // Auto-mute if dragged to 0
+                    if (vol === 0 && !isUserMuted) {
+                        isUserMuted = true;
+                        muteIcon.innerText = "🔇";
+                        muteIcon.style.opacity = "0.5";
+                        if (a) a.muted = true;
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = true);
+                    } 
+                    // Auto-unmute if dragged above 0 while muted
+                    else if (isUserMuted && vol > 0) {
                         isUserMuted = false;
                         muteIcon.innerText = "🔊";
                         muteIcon.style.opacity = "0.8";
