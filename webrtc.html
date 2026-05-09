@@ -70,7 +70,12 @@
         .user-item { padding: 12px 14px; background: #2b2d31; margin-bottom: 6px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; border: 1px solid transparent; transition: 0.2s; }
         .user-item:hover { border-color: #383a40; background: #313338; }
         .user-left { display: flex; align-items: center; gap: 10px; flex: 1; overflow: hidden; white-space: nowrap; color: #dbdee1; }
-        .status-dot { width: 10px; height: 10px; background: #23a559; border-radius: 50%; box-shadow: 0 0 8px rgba(35,165,89,0.4); }
+        
+        /* UPDATED: Status Dot Styling */
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; transition: 0.3s ease; }
+        .dot-good { background: #23a559; box-shadow: 0 0 8px rgba(35,165,89,0.4); }
+        .dot-med { background: #f0b232; box-shadow: 0 0 8px rgba(240,178,50,0.4); }
+        .dot-bad { background: #da373c; box-shadow: 0 0 8px rgba(218,55,60,0.4); }
         
         .vol-slider { -webkit-appearance: none; width: 65px; height: 3px; background: #4f545c; border-radius: 3px; outline: none; cursor: pointer; transition: 0.2s; }
         .vol-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #dbdee1; transition: 0.1s; }
@@ -147,7 +152,9 @@
 
         let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
-        const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {};
+        
+        // Added lastRealPing dictionary
+        const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
         // Clean SVG Download Icon
@@ -310,7 +317,12 @@
                     updateTypingUI(); 
                 }
                 else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
-                else if (data.type === 'pong') updatePingUI(sid, Date.now() - data.time);
+                else if (data.type === 'pong') {
+                    // Update actual ping map
+                    const lat = Date.now() - data.time;
+                    lastRealPing[sid] = lat;
+                    updatePingUI(sid, lat);
+                }
                 else if (data.type === 'play-sound') { 
                     playCustomSound(data.buffer, data.mime, sid); 
                     addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
@@ -379,7 +391,10 @@
             if (screenCalls[id]) { screenCalls[id].close(); delete screenCalls[id]; }
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
             $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
-            delete connections[id]; delete peerNames[id]; delete fileTransfers[id]; delete lastSeen[id]; pendingConnections.delete(id);
+            
+            // Clean up state tracking
+            delete connections[id]; delete peerNames[id]; delete fileTransfers[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
+            
             if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
             if (!Object.keys(connections).length) $('searching-container').style.display = 'flex';
         }
@@ -633,15 +648,54 @@
             } catch (err) {}
         }
 
+
+        // --- SPLIT NETWORK/UI LOOPS FOR SMOOTH DISCONNECT ---
+
+        // 1. Mesh Sync Loop (every 3 seconds)
         setInterval(() => {
-            const now = Date.now();
-            Object.keys(connections).forEach(id => { if (now - (lastSeen[id] || now) > 10000) removePeer(id); });
             if (isHost) { const peers = Object.keys(connections); if(peers.length) bcast({ type: 'mesh-sync', peers }); }
             else if (!connections[ROOM_ID]) connectToPeer(ROOM_ID);
-            bcast({ type: 'ping', time: now });
         }, 3000);
 
-        function updatePingUI(id, lat) { const p = $(`ping-${id}`); if(p){ p.innerText = `${lat}ms`; p.className = `ping-display ${lat<100?'ping-good':lat<300?'ping-med':'ping-bad'}`; } }
+        // 2. Ping Network Loop (every 1 second)
+        setInterval(() => {
+            bcast({ type: 'ping', time: Date.now() });
+        }, 1000);
+
+        // 3. UI Monitoring & Disconnect Loop (every 100ms for smooth visual updates)
+        setInterval(() => {
+            const now = Date.now();
+            Object.keys(connections).forEach(id => {
+                const elapsed = now - (lastSeen[id] || now);
+                
+                if (elapsed > 10000) {
+                    // Time's up! Kick them out
+                    removePeer(id);
+                } else if (elapsed > 1000) {
+                    // It's been over 1 second since we heard from them. They missed a ping!
+                    // Artificially start incrementing their last known ping to match the elapsed time 
+                    // so the UI visibly transitions through Yellow -> Red!
+                    const basePing = lastRealPing[id] || 0;
+                    const simulatedPing = Math.floor(basePing + (elapsed - 1000));
+                    updatePingUI(id, simulatedPing);
+                }
+            });
+        }, 100);
+
+        // UPDATED: Sync the Orb dot color with the numeric ping label
+        function updatePingUI(id, lat) { 
+            const p = $(`ping-${id}`); 
+            const dot = $(`status-dot-${id}`);
+            
+            if(p){ 
+                p.innerText = `${lat}ms`; 
+                p.className = `ping-display ${lat<100?'ping-good':lat<300?'ping-med':'ping-bad'}`; 
+            }
+            if(dot && id !== 'me'){ 
+                dot.className = `status-dot ${lat<100?'dot-good':lat<300?'dot-med':'dot-bad'}`;
+            }
+        }
+
         function enableChat() { $('msg-input').disabled = $('send-btn').disabled = false; }
         $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
 
@@ -669,6 +723,7 @@
             $('messages').scrollTop = $('messages').scrollHeight;
         }
 
+        // UPDATED: Inject an ID into the status orb so we can change it dynamically
         function addUserToSidebar(name, id) {
             if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
             const d = document.createElement('div'); d.className = 'user-item'; d.id = `sidebar-${id}`;
@@ -680,7 +735,7 @@
                 right = `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="mute-icon-${id}" style="font-size:14px;opacity:0.8;cursor:pointer;user-select:none;transition:0.2s;" title="Mute/Unmute">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
             }
 
-            d.innerHTML = `<div class="user-left"><div class="status-dot"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
+            d.innerHTML = `<div class="user-left"><div id="status-dot-${id}" class="status-dot dot-good"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
             $('user-list').appendChild(d);
             
             if (id === "me") {
