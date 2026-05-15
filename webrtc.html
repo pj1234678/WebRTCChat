@@ -484,7 +484,10 @@
                 }
                 else if (data.type === 'file-chunk') {
                     const tr = fileTransfers[data.txId]; if(!tr) return;
-                    tr.chunks.push(data.data); tr.received += data.data.byteLength;
+                    
+                    // FIXED: Properly index array instead of unreliably pushing
+                    tr.chunks[data.index] = data.data; 
+                    tr.received += data.data.byteLength;
                     
                     const bar = $(`bar-rx-${data.txId}`);
                     if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
@@ -739,7 +742,10 @@
 
                 const chunk = file.slice(offset, offset + 16384), buffer = await chunk.arrayBuffer();
                 for (let c of Object.values(connections)) if (c.open && c.dataChannel) while (c.dataChannel.bufferedAmount > 1048576) await new Promise(r => setTimeout(r, 50));
-                bcast({ type: 'file-chunk', txId: txId, data: buffer }); 
+                
+                // FIXED: Send index alongside the data chunk
+                bcast({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer }); 
+                
                 offset += 16384;
                 chunkCount++;
 
