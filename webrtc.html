@@ -176,6 +176,48 @@
         const playBeep = (freq, type) => { try { const ctx=new(window.AudioContext||window.webkitAudioContext)({ latencyHint: 'interactive' }),osc=ctx.createOscillator(),g=ctx.createGain();osc.type=type;osc.frequency.value=freq;g.gain.setValueAtTime(0.05,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.connect(g);g.connect(ctx.destination);osc.start();osc.stop(ctx.currentTime+0.3); } catch(e){} };
         const playJoinSound = () => playBeep(880, 'sine'), playLeaveSound = () => playBeep(440, 'triangle'); 
 
+        // SDP Munging for Forward Error Correction and DTX (Trick 1)
+        function mungeSDP(sdp) {
+            const match = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i);
+            if (match) {
+                const pt = match[1];
+                const fmtpRegex = new RegExp(`(a=fmtp:${pt} .*)`);
+                if (fmtpRegex.test(sdp)) {
+                    return sdp.replace(fmtpRegex, `$1;useinbandfec=1;usedtx=1`);
+                } else {
+                    return sdp.replace(new RegExp(`(a=rtpmap:${pt} opus\\/48000\\/2\\r\\n)`, 'i'), `$1a=fmtp:${pt} useinbandfec=1;usedtx=1\r\n`);
+                }
+            }
+            return sdp;
+        }
+
+        // Web Worker for Non-Blocking File Chunking (Trick 2)
+        const fileWorkerCode = `
+            self.onmessage = async (e) => {
+                try {
+                    const chunk = e.data.file.slice(e.data.offset, e.data.offset + e.data.chunkSize);
+                    const buffer = await chunk.arrayBuffer();
+                    self.postMessage({ buffer: buffer, txId: e.data.txId, index: e.data.index }, [buffer]);
+                } catch (err) {
+                    self.postMessage({ error: err.message, txId: e.data.txId, index: e.data.index });
+                }
+            };
+        `;
+        const fileWorker = new Worker(URL.createObjectURL(new Blob([fileWorkerCode], { type: 'application/javascript' })));
+        const readChunkViaWorker = (file, offset, chunkSize, txId, index) => {
+            return new Promise((resolve, reject) => {
+                const handler = (e) => {
+                    if (e.data.txId === txId && e.data.index === index) {
+                        fileWorker.removeEventListener('message', handler);
+                        if (e.data.error) reject(new Error(e.data.error));
+                        else resolve(e.data.buffer);
+                    }
+                };
+                fileWorker.addEventListener('message', handler);
+                fileWorker.postMessage({ file, offset, chunkSize, txId, index });
+            });
+        };
+
         let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         
@@ -405,7 +447,7 @@
             const connFile = peer.connect(targetId, { reliable: true, label: 'file' }); 
             handleNewConnection(connFile);
             
-            if (localStream) handleNewCall(peer.call(targetId, localStream, { metadata: { type: 'audio' } }));
+            if (localStream) handleNewCall(peer.call(targetId, localStream, { metadata: { type: 'audio' }, sdpTransform: mungeSDP }));
         }
 
         function handleNewConnection(conn) {
@@ -506,11 +548,11 @@
                 if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
                 
                 if (screenStream) {
-                    screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' } });
+                    screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
                     applyBitrateLimit(screenCalls[conn.peer], 1000000);
                 }
                 if (camStream) {
-                    camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' } });
+                    camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
                     applyBitrateLimit(camCalls[conn.peer], 500000);
                 }
             };
@@ -556,12 +598,12 @@
         function handleNewCall(call) {
             const type = call.metadata?.type;
             if (type === 'screenshare' || type === 'webcam') {
-                call.answer();
+                call.answer(undefined, { sdpTransform: mungeSDP });
                 call.on('stream', st => addVideoElement(call.peer + (type==='webcam'?'-cam':''), st, false));
                 call.on('close', () => $(`video-${call.peer}${type==='webcam'?'-cam':''}`)?.remove());
                 return;
             }
-            localStream ? call.answer(localStream) : call.answer();
+            localStream ? call.answer(localStream, { sdpTransform: mungeSDP }) : call.answer(undefined, { sdpTransform: mungeSDP });
             call.on('stream', st => {
                 if (!$(`audio-${call.peer}`)) {
                     const a = new Audio(); a.id = `audio-${call.peer}`; a.srcObject = st; a.autoplay = true;
@@ -631,7 +673,7 @@
                 
                 $('cam-btn').classList.add('active'); addVideoElement('me-cam', camStream, true);
                 Object.keys(connections).forEach(id => {
-                    camCalls[id] = peer.call(id, camStream, { metadata: { type: 'webcam' } });
+                    camCalls[id] = peer.call(id, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
                     applyBitrateLimit(camCalls[id], 500000); // Throttles cam upload to 500 kbps
                 });
             } catch (err) { console.error(err); }
@@ -653,7 +695,7 @@
                 $('screen-btn').classList.add('active'); addVideoElement('me', screenStream, true);
                 screenStream.getVideoTracks()[0].onended = $('screen-btn').onclick;
                 Object.keys(connections).forEach(id => {
-                    screenCalls[id] = peer.call(id, screenStream, { metadata: { type: 'screenshare' } });
+                    screenCalls[id] = peer.call(id, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
                     applyBitrateLimit(screenCalls[id], 1000000); // Throttles screen upload to 1 mbps
                 });
             } catch (err) {}
@@ -815,8 +857,8 @@
                     return; 
                 }
 
-                const chunk = file.slice(offset, offset + CHUNK_SIZE);
-                const buffer = await chunk.arrayBuffer();
+                // Chunk parsed via isolated Web Worker instead of main thread
+                const buffer = await readChunkViaWorker(file, offset, CHUNK_SIZE, txId, chunkCount);
                 
                 // Strict Backpressure Handling through the dedicated File Channel
                 for (let c of Object.values(fileConns)) {
