@@ -284,7 +284,7 @@
             
             const doCheck = () => {
                 if(!tempPeer || tempPeer.destroyed || tempPeer.disconnected) return;
-                const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true } });
+                const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true }, reliable: false });
                 let gotResp = false;
                 
                 pConn.on('open', () => { pConn.send({ type: 'get-count' }); });
@@ -342,7 +342,11 @@
                 Notification.requestPermission();
             }
 
-            try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); } 
+            try { 
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false, latency: 0 } 
+                }); 
+            } 
             catch(err) { /* Mic not available */ }
             
             $('login-screen').style.display = 'none'; $('conn-status').innerText = "Initializing...";
@@ -392,7 +396,11 @@
         function connectToPeer(targetId) {
             if (connections[targetId] || pendingConnections.has(targetId) || targetId === myId) return;
             pendingConnections.add(targetId); setTimeout(() => pendingConnections.delete(targetId), 4000);
-            const conn = peer.connect(targetId); handleNewConnection(conn);
+            
+            // Set data channel to unreliable (UDP mode) for lowest latency signaling
+            const conn = peer.connect(targetId, { reliable: false }); 
+            handleNewConnection(conn);
+            
             if (localStream) handleNewCall(peer.call(targetId, localStream, { metadata: { type: 'audio' } }));
         }
 
@@ -410,8 +418,15 @@
                 if (!isHost && conn.peer === ROOM_ID) { $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559"; }
                 conn.send({ type: 'name', value: myName });
                 if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
-                if (screenStream) screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' } });
-                if (camStream) camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' } });
+                
+                if (screenStream) {
+                    screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' } });
+                    applyBitrateLimit(screenCalls[conn.peer], 1000000);
+                }
+                if (camStream) {
+                    camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' } });
+                    applyBitrateLimit(camCalls[conn.peer], 500000);
+                }
             };
             conn.open ? setup() : conn.on('open', setup);
             conn.on('data', data => {
@@ -538,6 +553,20 @@
                 }
             });
         }
+        
+        function applyBitrateLimit(call, maxBitrate) {
+            call.on('open', () => {
+                if (!call.peerConnection) return;
+                const senders = call.peerConnection.getSenders();
+                const videoSender = senders.find(s => s.track && s.track.kind === 'video');
+                if (videoSender) {
+                    const params = videoSender.getParameters();
+                    if (!params.encodings) params.encodings = [{}];
+                    params.encodings[0].maxBitrate = maxBitrate;
+                    videoSender.setParameters(params).catch(e => console.warn("Failed to set bitrate limit", e));
+                }
+            });
+        }
 
         function removePeer(id) {
             if (!connections[id]) return;
@@ -574,9 +603,17 @@
                 camCalls = {}; camStream = null; $('cam-btn').classList.remove('active'); $('video-me-cam')?.remove(); return;
             }
             try {
-                camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                camStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } } 
+                });
+                const camTrack = camStream.getVideoTracks()[0];
+                if (camTrack) camTrack.contentHint = 'fluid';
+                
                 $('cam-btn').classList.add('active'); addVideoElement('me-cam', camStream, true);
-                Object.keys(connections).forEach(id => camCalls[id] = peer.call(id, camStream, { metadata: { type: 'webcam' } }));
+                Object.keys(connections).forEach(id => {
+                    camCalls[id] = peer.call(id, camStream, { metadata: { type: 'webcam' } });
+                    applyBitrateLimit(camCalls[id], 500000); // Throttles cam upload to 500 kbps
+                });
             } catch (err) { console.error(err); }
         };
 
@@ -586,10 +623,19 @@
                 screenCalls = {}; screenStream = null; $('screen-btn').classList.remove('active'); $('video-me')?.remove(); return;
             }
             try {
-                screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+                screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+                    video: { frameRate: { ideal: 15, max: 30 } }, 
+                    audio: true 
+                });
+                const screenTrack = screenStream.getVideoTracks()[0];
+                if (screenTrack) screenTrack.contentHint = 'detail';
+                
                 $('screen-btn').classList.add('active'); addVideoElement('me', screenStream, true);
                 screenStream.getVideoTracks()[0].onended = $('screen-btn').onclick;
-                Object.keys(connections).forEach(id => screenCalls[id] = peer.call(id, screenStream, { metadata: { type: 'screenshare' } }));
+                Object.keys(connections).forEach(id => {
+                    screenCalls[id] = peer.call(id, screenStream, { metadata: { type: 'screenshare' } });
+                    applyBitrateLimit(screenCalls[id], 1000000); // Throttles screen upload to 1 mbps
+                });
             } catch (err) {}
         };
 
