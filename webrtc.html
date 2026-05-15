@@ -284,7 +284,7 @@
             
             const doCheck = () => {
                 if(!tempPeer || tempPeer.destroyed || tempPeer.disconnected) return;
-                const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true }, reliable: false });
+                const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true }, reliable: true });
                 let gotResp = false;
                 
                 pConn.on('open', () => { pConn.send({ type: 'get-count' }); });
@@ -397,8 +397,8 @@
             if (connections[targetId] || pendingConnections.has(targetId) || targetId === myId) return;
             pendingConnections.add(targetId); setTimeout(() => pendingConnections.delete(targetId), 4000);
             
-            // Set data channel to unreliable (UDP mode) for lowest latency signaling
-            const conn = peer.connect(targetId, { reliable: false }); 
+            // Set data channel to reliable to ensure delivery and correct ordering
+            const conn = peer.connect(targetId, { reliable: true }); 
             handleNewConnection(conn);
             
             if (localStream) handleNewCall(peer.call(targetId, localStream, { metadata: { type: 'audio' } }));
@@ -500,7 +500,7 @@
                 else if (data.type === 'file-chunk') {
                     const tr = fileTransfers[data.txId]; if(!tr) return;
                     
-                    // FIXED: Properly index array instead of unreliably pushing
+                    // Properly index array instead of unreliably pushing
                     tr.chunks[data.index] = data.data; 
                     tr.received += data.data.byteLength;
                     
@@ -766,6 +766,8 @@
 
             let offset = 0;
             let chunkCount = 0;
+            const CHUNK_SIZE = 65536; // High-Performance 64KB Chunking
+            
             while (offset < file.size) {
                 // Break if user clicks Cancel
                 if (activeTransfers.tx[txId].canceled) return;
@@ -786,13 +788,22 @@
                     return; 
                 }
 
-                const chunk = file.slice(offset, offset + 16384), buffer = await chunk.arrayBuffer();
-                for (let c of Object.values(connections)) if (c.open && c.dataChannel) while (c.dataChannel.bufferedAmount > 1048576) await new Promise(r => setTimeout(r, 50));
+                const chunk = file.slice(offset, offset + CHUNK_SIZE);
+                const buffer = await chunk.arrayBuffer();
                 
-                // FIXED: Send index alongside the data chunk
+                // Strict Backpressure Handling
+                for (let c of Object.values(connections)) {
+                    if (c.open && c.dataChannel) {
+                        // Aggressively monitor bufferedAmount, pausing loop if network pipe begins choking
+                        while (c.dataChannel.bufferedAmount > CHUNK_SIZE * 4) { 
+                            await new Promise(r => setTimeout(r, 10)); 
+                        }
+                    }
+                }
+                
                 bcast({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer }); 
                 
-                offset += 16384;
+                offset += CHUNK_SIZE;
                 chunkCount++;
 
                 const bar = $(`bar-${txId}`);
