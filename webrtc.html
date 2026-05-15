@@ -173,13 +173,13 @@
 
     <script>
         const $ = id => document.getElementById(id);
-        const playBeep = (freq, type) => { try { const ctx=new(window.AudioContext||window.webkitAudioContext)(),osc=ctx.createOscillator(),g=ctx.createGain();osc.type=type;osc.frequency.value=freq;g.gain.setValueAtTime(0.05,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.connect(g);g.connect(ctx.destination);osc.start();osc.stop(ctx.currentTime+0.3); } catch(e){} };
+        const playBeep = (freq, type) => { try { const ctx=new(window.AudioContext||window.webkitAudioContext)({ latencyHint: 'interactive' }),osc=ctx.createOscillator(),g=ctx.createGain();osc.type=type;osc.frequency.value=freq;g.gain.setValueAtTime(0.05,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.connect(g);g.connect(ctx.destination);osc.start();osc.stop(ctx.currentTime+0.3); } catch(e){} };
         const playJoinSound = () => playBeep(880, 'sine'), playLeaveSound = () => playBeep(440, 'triangle'); 
 
         let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         
-        const connections = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};
+        const connections = {}, fileConns = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
         const dlIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
@@ -217,7 +217,7 @@
 
         window.toggleRx = (txId, sid) => {
             const tr = fileTransfers[txId];
-            const conn = connections[sid];
+            const conn = fileConns[sid];
             if (tr && conn && conn.open) {
                 tr.paused = !tr.paused;
                 const btn = $(`pause-rx-${txId}`);
@@ -344,7 +344,7 @@
 
             try { 
                 localStream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false, latency: 0 } 
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, latency: 0 } 
                 }); 
             } 
             catch(err) { /* Mic not available */ }
@@ -397,9 +397,13 @@
             if (connections[targetId] || pendingConnections.has(targetId) || targetId === myId) return;
             pendingConnections.add(targetId); setTimeout(() => pendingConnections.delete(targetId), 4000);
             
-            // Set data channel to reliable to ensure delivery and correct ordering
-            const conn = peer.connect(targetId, { reliable: true }); 
-            handleNewConnection(conn);
+            // Channel 2 (Chat & Events) - Unreliable for lowest latency
+            const connChat = peer.connect(targetId, { reliable: false, label: 'chat' }); 
+            handleNewConnection(connChat);
+
+            // Channel 1 (Files) - Reliable for guaranteed delivery
+            const connFile = peer.connect(targetId, { reliable: true, label: 'file' }); 
+            handleNewConnection(connFile);
             
             if (localStream) handleNewCall(peer.call(targetId, localStream, { metadata: { type: 'audio' } }));
         }
@@ -412,6 +416,88 @@
                 return;
             }
 
+            // FILE DATA CHANNEL ISOLATION
+            if (conn.label === 'file') {
+                const setupFile = () => { fileConns[conn.peer] = conn; };
+                conn.open ? setupFile() : conn.on('open', setupFile);
+                
+                conn.on('data', data => {
+                    const sid = conn.peer; lastSeen[sid] = Date.now();
+                    
+                    if (data.type === 'file-control') {
+                        const tr = fileTransfers[data.txId];
+                        if (!tr && data.action !== 'cancel') return;
+                        
+                        if (data.action === 'pause') {
+                            const btn = $(`pause-rx-${data.txId}`);
+                            if (btn) { btn.innerHTML = "▶️ Resume"; tr.paused = true; }
+                        } else if (data.action === 'resume') {
+                            const btn = $(`pause-rx-${data.txId}`);
+                            if (btn) { btn.innerHTML = "⏸️ Pause"; tr.paused = false; }
+                        } else if (data.action === 'cancel') {
+                            delete fileTransfers[data.txId];
+                            const msgNode = $(`msg-rx-${data.txId}`);
+                            if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
+                        }
+                    }
+                    else if (data.type === 'file-control-rx') {
+                        const tx = activeTransfers.tx[data.txId];
+                        if (tx) {
+                            if (data.action === 'pause' && !tx.paused) window.toggleTx(data.txId);
+                            else if (data.action === 'resume' && tx.paused) window.toggleTx(data.txId);
+                        }
+                    }
+                    else if (data.type === 'file-meta') { 
+                        const txId = data.txId;
+                        fileTransfers[txId] = { meta: data, chunks: [], received: 0, senderId: sid, paused: false }; 
+                        const progHtml = `
+                        <div>📥 Downloading <b>${data.name}</b>...</div>
+                        <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
+                        <div style="margin-top: 8px; display: flex; gap: 8px;">
+                            <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
+                            <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
+                        </div>`;
+                        addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
+                    }
+                    else if (data.type === 'file-chunk') {
+                        const tr = fileTransfers[data.txId]; if(!tr) return;
+                        
+                        // Properly index array instead of unreliably pushing
+                        tr.chunks[data.index] = data.data; 
+                        tr.received += data.data.byteLength;
+                        
+                        const bar = $(`bar-rx-${data.txId}`);
+                        if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
+
+                        if (tr.received >= tr.meta.size) {
+                            const msgNode = $(`msg-rx-${data.txId}`);
+                            if (msgNode) msgNode.remove();
+
+                            const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
+                            const senderName = peerNames[sid] || "Someone";
+
+                            if (tr.meta.fileType.startsWith('image/')) {
+                                addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
+                            } else if (tr.meta.fileType.startsWith('video/')) {
+                                addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
+                            } else if (tr.meta.fileType.startsWith('audio/')) {
+                                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
+                            } else {
+                                addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
+                            }
+
+                            playJoinSound();
+                            notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
+                            delete fileTransfers[data.txId];
+                        }
+                    }
+                });
+                conn.on('close', () => delete fileConns[conn.peer]); 
+                conn.on('error', () => delete fileConns[conn.peer]);
+                return;
+            }
+
+            // --- MAIN CHAT CONNECTION (Unreliable) ---
             const setup = () => {
                 pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
                 $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
@@ -428,6 +514,7 @@
                     applyBitrateLimit(camCalls[conn.peer], 500000);
                 }
             };
+            
             conn.open ? setup() : conn.on('open', setup);
             conn.on('data', data => {
                 const sid = conn.peer; lastSeen[sid] = Date.now();
@@ -461,73 +548,6 @@
                     addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
                     const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
                     addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
-                }
-                else if (data.type === 'file-control') {
-                    const tr = fileTransfers[data.txId];
-                    if (!tr && data.action !== 'cancel') return;
-                    
-                    if (data.action === 'pause') {
-                        const btn = $(`pause-rx-${data.txId}`);
-                        if (btn) { btn.innerHTML = "▶️ Resume"; tr.paused = true; }
-                    } else if (data.action === 'resume') {
-                        const btn = $(`pause-rx-${data.txId}`);
-                        if (btn) { btn.innerHTML = "⏸️ Pause"; tr.paused = false; }
-                    } else if (data.action === 'cancel') {
-                        delete fileTransfers[data.txId];
-                        const msgNode = $(`msg-rx-${data.txId}`);
-                        if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
-                    }
-                }
-                else if (data.type === 'file-control-rx') {
-                    const tx = activeTransfers.tx[data.txId];
-                    if (tx) {
-                        if (data.action === 'pause' && !tx.paused) window.toggleTx(data.txId);
-                        else if (data.action === 'resume' && tx.paused) window.toggleTx(data.txId);
-                    }
-                }
-                else if (data.type === 'file-meta') { 
-                    const txId = data.txId;
-                    fileTransfers[txId] = { meta: data, chunks: [], received: 0, senderId: sid, paused: false }; 
-                    const progHtml = `
-                    <div>📥 Downloading <b>${data.name}</b>...</div>
-                    <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
-                    <div style="margin-top: 8px; display: flex; gap: 8px;">
-                        <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
-                        <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
-                    </div>`;
-                    addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
-                }
-                else if (data.type === 'file-chunk') {
-                    const tr = fileTransfers[data.txId]; if(!tr) return;
-                    
-                    // Properly index array instead of unreliably pushing
-                    tr.chunks[data.index] = data.data; 
-                    tr.received += data.data.byteLength;
-                    
-                    const bar = $(`bar-rx-${data.txId}`);
-                    if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
-
-                    if (tr.received >= tr.meta.size) {
-                        const msgNode = $(`msg-rx-${data.txId}`);
-                        if (msgNode) msgNode.remove();
-
-                        const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
-                        const senderName = peerNames[sid] || "Someone";
-
-                        if (tr.meta.fileType.startsWith('image/')) {
-                            addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
-                        } else if (tr.meta.fileType.startsWith('video/')) {
-                            addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
-                        } else if (tr.meta.fileType.startsWith('audio/')) {
-                            addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
-                        } else {
-                            addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
-                        }
-
-                        playJoinSound();
-                        notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
-                        delete fileTransfers[data.txId];
-                    }
                 }
             });
             conn.on('close', () => removePeer(conn.peer)); conn.on('error', () => removePeer(conn.peer));
@@ -591,7 +611,7 @@
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
             $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
             
-            delete connections[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
+            delete connections[id]; delete fileConns[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
             
             if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
             if (!Object.keys(connections).length) $('searching-container').style.display = 'flex';
@@ -654,7 +674,14 @@
             $('video-grid').appendChild(v);
         }
 
-        const bcast = d => Object.values(connections).forEach(c => c.open && c.send(d));
+        // Refactored Broadcasting function: Routes to file channel if type matches, else chat channel
+        const bcast = d => {
+            if (d.type && d.type.startsWith('file-')) {
+                Object.values(fileConns).forEach(c => c.open && c.send(d));
+            } else {
+                Object.values(connections).forEach(c => c.open && c.send(d));
+            }
+        };
         
         $('send-btn').onclick = () => { 
             const t = $('msg-input').value; 
@@ -791,8 +818,8 @@
                 const chunk = file.slice(offset, offset + CHUNK_SIZE);
                 const buffer = await chunk.arrayBuffer();
                 
-                // Strict Backpressure Handling
-                for (let c of Object.values(connections)) {
+                // Strict Backpressure Handling through the dedicated File Channel
+                for (let c of Object.values(fileConns)) {
                     if (c.open && c.dataChannel) {
                         // Aggressively monitor bufferedAmount, pausing loop if network pipe begins choking
                         while (c.dataChannel.bufferedAmount > CHUNK_SIZE * 4) { 
