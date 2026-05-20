@@ -233,8 +233,7 @@
         const typingUsers = new Set();
         let tempPeer = null;
 
-        // Security Guardrails Configuration
-        const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB Max upload payload size
+        // Security Guardrails Configuration - FILE SIZE CAPS REMOVED
         const MAX_CONCURRENT_SOUNDS_PER_PEER = 3; // Prevent audio flooding
         const ALLOWED_FILE_TYPES = [
             'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -534,7 +533,8 @@
                         }
                     }
                     else if (data.type === 'file-meta') { 
-                        if (data.size > MAX_FILE_SIZE || !ALLOWED_FILE_TYPES.includes(data.fileType)) {
+                        // Size threshold parameter block bypassed entirely
+                        if (!ALLOWED_FILE_TYPES.includes(data.fileType)) {
                             conn.send({ type: 'file-control-rx', txId: data.txId, action: 'cancel' });
                             return;
                         }
@@ -553,11 +553,6 @@
                     else if (data.type === 'file-chunk') {
                         const tr = fileTransfers[data.txId]; if(!tr) return;
                         
-                        if (tr.received + data.data.byteLength > MAX_FILE_SIZE) {
-                            window.cancelRx(data.txId, sid);
-                            return;
-                        }
-
                         tr.chunks[data.index] = data.data; 
                         tr.received += data.data.byteLength;
                         
@@ -639,7 +634,6 @@
                     updatePingUI(sid, lat);
                 }
                 else if (data.type === 'play-sound') { 
-                    if (data.buffer && data.buffer.byteLength > MAX_FILE_SIZE) return;
                     if (!ALLOWED_FILE_TYPES.includes(data.mime) || !data.mime.startsWith('audio/')) return;
                     
                     const safeSoundName = escapeHTML(data.name || 'sound');
@@ -850,9 +844,6 @@
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                 const file = e.dataTransfer.files[0];
                 
-                if (file.size > MAX_FILE_SIZE) {
-                    return addSystemMsg(`❌ Processing blocked. Attachment exceeds structural threshold (${MAX_FILE_SIZE / (1024 * 1024)}MB).`);
-                }
                 if (!ALLOWED_FILE_TYPES.includes(file.type)) {
                     return addSystemMsg("❌ Processing blocked. Media specification type unauthorized.");
                 }
@@ -876,8 +867,8 @@
 
         async function sendFile(file) {
             if (!file) return;
-            if (file.size > MAX_FILE_SIZE || !ALLOWED_FILE_TYPES.includes(file.type)) {
-                return addSystemMsg("❌ Dispatch execution terminated. Attachment parameters out of bounds.");
+            if (!ALLOWED_FILE_TYPES.includes(file.type)) {
+                return addSystemMsg("❌ Dispatch execution terminated. Media specification type unauthorized.");
             }
             if (Object.keys(connections).length === 0) {
                 return addSystemMsg("❌ No one is in the room to receive files!");
@@ -920,16 +911,22 @@
                     return; 
                 }
 
-                const buffer = await readChunkViaWorker(file, offset, CHUNK_SIZE, txId, chunkCount);
-                
+                // Calculate current backpressure threshold dynamically
+                let backpressure = false;
                 for (let c of Object.values(fileConns)) {
-                    if (c.open && c.dataChannel) {
-                        while (c.dataChannel.bufferedAmount > CHUNK_SIZE * 4) { 
-                            await new Promise(r => setTimeout(r, 10)); 
-                        }
+                    if (c.open && c.dataChannel && c.dataChannel.bufferedAmount > CHUNK_SIZE * 8) { 
+                        backpressure = true;
+                        break;
                     }
                 }
                 
+                // If data channels are choked, sleep until buffers clear out to prevent crashes on large files
+                if (backpressure) {
+                    await new Promise(r => setTimeout(r, 30));
+                    continue; 
+                }
+
+                const buffer = await readChunkViaWorker(file, offset, CHUNK_SIZE, txId, chunkCount);
                 bcast({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer }); 
                 
                 offset += CHUNK_SIZE;
@@ -938,7 +935,7 @@
                 const bar = $(`bar-${txId}`);
                 if (bar) bar.style.width = `${Math.min((offset / file.size) * 100, 100)}%`;
 
-                if (chunkCount % 5 === 0) await new Promise(r => setTimeout(r, 0));
+                if (chunkCount % 10 === 0) await new Promise(r => setTimeout(r, 1));
             }
             
             if (!activeTransfers.tx[txId].canceled) {
@@ -980,7 +977,7 @@
             const file = e.target.files[0];
             if (!file) return;
 
-            if (file.size > MAX_FILE_SIZE || !file.type.startsWith('audio/')) {
+            if (!file.type.startsWith('audio/')) {
                 return addSystemMsg("❌ Sound configuration out of compliance specifications.");
             }
             
