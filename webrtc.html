@@ -97,7 +97,7 @@
         .vol-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #dbdee1; transition: 0.1s; }
         .vol-slider::-webkit-slider-thumb:hover { transform: scale(1.2); background: #fff; }
         
-        .ping-display { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; font-family: monospace; white-space: nowrap; }
+        .ping-display { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; font-family: monospace; white-space: monospace; }
         .ping-good { color: #23a559; } .ping-med { color: #f0b232; } .ping-bad { color: #da373c; }
 
         #searching-container { padding: 20px; text-align: center; color: #949ba4; font-size: 13px; font-weight: 500; display: none; flex-direction: column; align-items: center; gap: 15px; }
@@ -220,8 +220,10 @@
 
         let myName = "", myId = "", isHost = false, peer, ROOM_ID = "", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
+        let rawPasswordText = ""; // Holds raw validation reference string
         
         const connections = {}, fileConns = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};
+        const authenticatedPeers = new Set(); // Stores verified client tokens
         const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
         const dlIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
@@ -339,6 +341,15 @@
             return `superconf-mesh-${hashHex.substring(0, 32)}`;
         }
 
+        // Crypto validation response builder - Upgraded to match SHA-384 room profile context rules
+        async function calculateChallengeProof(challenge, password) {
+            const encoder = new TextEncoder();
+            const dataBuffer = encoder.encode(challenge + password.trim());
+            const hashBuffer = await crypto.subtle.digest('SHA-384', dataBuffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             tempPeer = new Peer(peerConfig);
             
@@ -424,6 +435,7 @@
             if (tempPeer && !tempPeer.destroyed) { tempPeer.destroy(); }
             
             myName = $('username').value.trim() || "Anon";
+            rawPasswordText = rPass; // Stash local text secret safely
             ROOM_ID = await generateRoomHash(rPass);
             
             if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
@@ -503,16 +515,22 @@
             }
 
             if (conn.label === 'file') {
-                const setupFile = () => { fileConns[conn.peer] = conn; };
+                const setupFile = () => { 
+                    fileConns[conn.peer] = conn; 
+                };
                 conn.open ? setupFile() : conn.on('open', setupFile);
-                
                 conn.on('data', data => {
-                    const sid = conn.peer; lastSeen[sid] = Date.now();
+                    const sid = conn.peer;
                     
+                    // Enforce secondary mesh boundary validation for files channel 
+                    if (!authenticatedPeers.has(sid)) {
+                        return;
+                    }
+                    
+                    lastSeen[sid] = Date.now();
                     if (data.type === 'file-control') {
                         const tr = fileTransfers[data.txId];
                         if (!tr && data.action !== 'cancel') return;
-                        
                         if (data.action === 'pause') {
                             const btn = $(`pause-rx-${data.txId}`);
                             if (btn) { btn.innerHTML = "▶️ Resume"; tr.paused = true; }
@@ -524,49 +542,40 @@
                             const msgNode = $(`msg-rx-${data.txId}`);
                             if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
                         }
-                    }
-                    else if (data.type === 'file-control-rx') {
+                    } else if (data.type === 'file-control-rx') {
                         const tx = activeTransfers.tx[data.txId];
                         if (tx) {
                             if (data.action === 'pause' && !tx.paused) window.toggleTx(data.txId);
                             else if (data.action === 'resume' && tx.paused) window.toggleTx(data.txId);
                         }
-                    }
-                    else if (data.type === 'file-meta') { 
-                        // Size threshold parameter block bypassed entirely
+                    } else if (data.type === 'file-meta') {
                         if (!ALLOWED_FILE_TYPES.includes(data.fileType)) {
                             conn.send({ type: 'file-control-rx', txId: data.txId, action: 'cancel' });
                             return;
                         }
-
                         const txId = data.txId;
-                        fileTransfers[txId] = { meta: data, chunks: [], received: 0, senderId: sid, paused: false }; 
+                        fileTransfers[txId] = { meta: data, chunks: [], received: 0, senderId: sid, paused: false };
                         const progHtml = `
-                        <div>📥 Downloading <b>${escapeHTML(data.name)}</b>...</div>
-                        <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
-                        <div style="margin-top: 8px; display: flex; gap: 8px;">
-                            <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
-                            <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
-                        </div>`;
+                            <div>📥 Downloading <b>${escapeHTML(data.name)}</b>...</div>
+                            <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
+                            <div style="margin-top: 8px; display: flex; gap: 8px;">
+                                <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
+                                <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
+                            </div>`;
                         addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
-                    }
-                    else if (data.type === 'file-chunk') {
-                        const tr = fileTransfers[data.txId]; if(!tr) return;
-                        
-                        tr.chunks[data.index] = data.data; 
+                    } else if (data.type === 'file-chunk') {
+                        const tr = fileTransfers[data.txId];
+                        if(!tr) return;
+                        tr.chunks[data.index] = data.data;
                         tr.received += data.data.byteLength;
-                        
                         const bar = $(`bar-rx-${data.txId}`);
                         if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
-
                         if (tr.received >= tr.meta.size) {
                             const msgNode = $(`msg-rx-${data.txId}`);
                             if (msgNode) msgNode.remove();
-
                             const safeName = escapeHTML(tr.meta.name);
                             const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
                             const senderName = peerNames[sid] || "Someone";
-
                             if (tr.meta.fileType.startsWith('image/')) {
                                 addMessage(`<img src="${url}"><a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
                             } else if (tr.meta.fileType.startsWith('video/')) {
@@ -576,599 +585,383 @@
                             } else {
                                 addMessage(`<div>📂 ${safeName}</div><a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
                             }
-
                             playJoinSound();
                             notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
                             delete fileTransfers[data.txId];
                         }
                     }
                 });
-                conn.on('close', () => delete fileConns[conn.peer]); 
+                conn.on('close', () => delete fileConns[conn.peer]);
                 conn.on('error', () => delete fileConns[conn.peer]);
                 return;
             }
 
-            const setup = () => {
-                pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
-                $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
-                if (!isHost && conn.peer === ROOM_ID) { $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559"; }
-                conn.send({ type: 'name', value: myName });
-                if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
-                
-                if (screenStream) {
-                    screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
-                    applyBitrateLimit(screenCalls[conn.peer], 1000000);
-                }
-                if (camStream) {
-                    camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
-                    applyBitrateLimit(camCalls[conn.peer], 500000);
-                }
-            };
-            
-            conn.open ? setup() : conn.on('open', setup);
-            conn.on('data', data => {
-                const sid = conn.peer; lastSeen[sid] = Date.now();
-                if (data.type === 'name') {
-                    const safeName = escapeHTML(data.value);
-                    peerNames[sid] = safeName;
-                    addUserToSidebar(safeName, sid);
-                    addSystemMsg(`<b>${safeName}</b> joined.`);
-                    playJoinSound();
-                }
-                else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
-                else if (data.type === 'text') {
-                    const senderName = peerNames[sid] || "Unknown";
-                    addMessage(linkify(escapeHTML(data.value)), senderName, 'theirs');
-                    playJoinSound();
-                    notifyUser(`New message from ${senderName}`, data.value);
-                }
-                else if (data.type === 'typing') { 
-                    const uname = peerNames[sid] || "Someone"; 
-                    data.state ? typingUsers.add(uname) : typingUsers.delete(uname); 
-                    updateTypingUI(); 
-                }
-                else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
-                else if (data.type === 'pong') {
-                    const lat = Date.now() - data.time;
-                    lastRealPing[sid] = lat;
-                    updatePingUI(sid, lat);
-                }
-                else if (data.type === 'play-sound') { 
-                    if (!ALLOWED_FILE_TYPES.includes(data.mime) || !data.mime.startsWith('audio/')) return;
+            // --- Chat/Control Handshake Layer Implementation ---
+            if (conn.label === 'chat') {
+                // Initialize eviction timers on incoming connection rings
+                const authTimeout = setTimeout(() => {
+                    if (!authenticatedPeers.has(conn.peer)) {
+                        console.warn(`Peer ${conn.peer} handshaking challenge expired. Drops line.`);
+                        conn.close();
+                    }
+                }, 4000);
+
+                const setup = () => {
+                    pendingConnections.delete(conn.peer);
+                    lastSeen[conn.peer] = Date.now();
                     
-                    const safeSoundName = escapeHTML(data.name || 'sound');
-                    playCustomSound(data.buffer, data.mime, sid); 
-                    addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
-                    const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${safeSoundName}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
-                }
-            });
-            conn.on('close', () => removePeer(conn.peer)); conn.on('error', () => removePeer(conn.peer));
+                    // Dispatch nonce token challenge payload over line
+                    const challengeNonce = crypto.randomUUID();
+                    conn.localAuthChallenge = challengeNonce;
+                    conn.send({ type: 'mesh-auth-challenge', challenge: challengeNonce });
+                };
+
+                conn.open ? setup() : conn.on('open', setup);
+
+                conn.on('data', async data => {
+                    const sid = conn.peer;
+                    lastSeen[sid] = Date.now();
+
+                    // Process dynamic authorization packets via SHA-384 context validation
+                    if (data.type === 'mesh-auth-challenge') {
+                        const calculatedProof = await calculateChallengeProof(data.challenge, rawPasswordText);
+                        conn.send({ type: 'mesh-auth-response', proof: calculatedProof });
+                        return;
+                    }
+
+                    if (data.type === 'mesh-auth-response') {
+                        if (!conn.localAuthChallenge) return conn.close();
+                        const expectedProof = await calculateChallengeProof(conn.localAuthChallenge, rawPasswordText);
+                        
+                        if (data.proof === expectedProof) {
+                            clearTimeout(authTimeout);
+                            authenticatedPeers.add(sid);
+                            
+                            // Re-allow UI tracking pipelines post validation clearance
+                            $('searching-container').style.display = 'none';
+                            connections[sid] = conn;
+                            
+                            if (!isHost && sid === ROOM_ID) {
+                                $('conn-status').innerText = "Connected";
+                                $('conn-status').style.color = "#23a559";
+                            }
+                            
+                            conn.send({ type: 'name', value: myName });
+                            if (isHost) {
+                                const peers = Object.keys(connections).filter(id => id !== sid);
+                                if(peers.length) conn.send({ type: 'peer-list', peers });
+                            }
+                            
+                            if (screenStream) {
+                                screenCalls[sid] = peer.call(sid, screenStream, { metadata: { type: 'screenshare' } });
+                            }
+                            if (camStream) {
+                                camCalls[sid] = peer.call(sid, camStream, { metadata: { type: 'camshare' } });
+                            }
+                        } else {
+                            console.error("Cryptographic signature payload verification error. Terminating peer link.");
+                            conn.close();
+                        }
+                        return;
+                    }
+
+                    // Strict access gating framework — suppress all activity from unverified origins
+                    if (!authenticatedPeers.has(sid)) return;
+
+                    if (data.type === 'name') {
+                        const originalName = peerNames[sid];
+                        peerNames[sid] = data.value || "Anon";
+                        const safeName = escapeHTML(peerNames[sid]);
+                        
+                        if (!originalName) {
+                            addSystemMsg(`<b>${safeName}</b> entered the mesh conference.`);
+                            playJoinSound();
+                            notifyUser("Peer Joined", `${peerNames[sid]} joined the room.`);
+                        }
+                        updateUserInSidebar(sid, safeMyName = safeName);
+                        
+                        if (!isHost) {
+                            Object.keys(peerNames).forEach(pId => {
+                                if (pId !== myId && pId !== sid) connectToPeer(pId);
+                            });
+                        }
+                    } 
+                    else if (data.type === 'peer-list') {
+                        data.peers.forEach(connectToPeer);
+                    }
+                    else if (data.type === 'chat') {
+                        addMessage(linkify(escapeHTML(data.value)), peerNames[sid] || "Anon", 'theirs');
+                        playJoinSound();
+                        notifyUser(`Message from ${peerNames[sid] || "Anon"}`, data.value);
+                    }
+                    else if (data.type === 'typing') {
+                        if (data.isTyping) typingUsers.add(sid);
+                        else typingUsers.delete(sid);
+                        updateTypingIndicator();
+                    }
+                    else if (data.type === 'sound') {
+                        if (!activeSounds[sid]) activeSounds[sid] = [];
+                        if (activeSounds[sid].length >= MAX_CONCURRENT_SOUNDS_PER_PEER) {
+                            const oldAudio = activeSounds[sid].shift();
+                            if (oldAudio) { oldAudio.pause(); oldAudio.remove(); }
+                        }
+                        try {
+                            const audio = new Audio(data.url);
+                            audio.volume = parseFloat($(`vol-${sid}`)?.value ?? 0.8);
+                            audio.muted = isUserMuted;
+                            activeSounds[sid].push(audio);
+                            audio.onended = () => {
+                                activeSounds[sid] = activeSounds[sid].filter(a => a !== audio);
+                            };
+                            audio.play();
+                        } catch(e) { console.error("Sound playback failure", e); }
+                    }
+                    else if (data.type === 'mute-status') {
+                        const dot = $(`dot-${sid}`);
+                        if (dot) {
+                            dot.className = `status-dot ${data.isMuted ? 'dot-bad' : 'dot-good'}`;
+                        }
+                    }
+                    else if (data.type === 'ping') {
+                        conn.send({ type: 'pong', ts: data.ts });
+                    }
+                    else if (data.type === 'pong') {
+                        const rtt = Date.now() - data.ts;
+                        lastRealPing[sid] = rtt;
+                        const label = $(`ping-${sid}`);
+                        if (label) {
+                            label.innerText = `${rtt}ms`;
+                            label.className = `ping-display ${rtt < 80 ? 'ping-good' : rtt < 180 ? 'ping-med' : 'ping-bad'}`;
+                        }
+                    }
+                });
+
+                conn.on('close', () => removePeer(conn.peer));
+                conn.on('error', () => removePeer(conn.peer));
+            }
         }
 
         function handleNewCall(call) {
-            const type = call.metadata?.type;
-            if (type === 'screenshare' || type === 'webcam') {
-                call.answer(undefined, { sdpTransform: mungeSDP });
-                call.on('stream', st => addVideoElement(call.peer + (type==='webcam'?'-cam':''), st, false));
-                call.on('close', () => $(`video-${call.peer}${type==='webcam'?'-cam':''}`)?.remove());
+            // Guard Media stream hook allocations behind password validation clearance 
+            if (call.peer !== ROOM_ID && !authenticatedPeers.has(call.peer)) {
+                call.close();
                 return;
             }
-            localStream ? call.answer(localStream, { sdpTransform: mungeSDP }) : call.answer(undefined, { sdpTransform: mungeSDP });
-            call.on('stream', st => {
-                if (!$(`audio-${call.peer}`)) {
-                    const a = new Audio(); a.id = `audio-${call.peer}`; a.srcObject = st; a.autoplay = true;
-                    document.body.appendChild(a);
-                    
-                    const vs = $(`vol-${call.peer}`); if(vs) a.volume = vs.value;
-                    const muteIcon = $(`mute-icon-${call.peer}`);
-                    if(muteIcon && muteIcon.innerText === "🔇") a.muted = true;
+
+            const sid = call.peer;
+            call.on('stream', stream => {
+                if (call.metadata?.type === 'screenshare' || call.metadata?.type === 'camshare') {
+                    const gridId = `video-${sid}-${call.metadata.type}`;
+                    let v = $(gridId);
+                    if (!v) {
+                        v = document.createElement('video');
+                        v.id = gridId;
+                        v.className = 'screen-video';
+                        v.autoplay = true;
+                        v.playsInline = true;
+                        $('video-grid').appendChild(v);
+                    }
+                    v.srcObject = stream;
+                } else {
+                    const gridId = `audio-${sid}`;
+                    let a = $(gridId);
+                    if (!a) {
+                        a = document.createElement('audio');
+                        a.id = gridId;
+                        a.autoplay = true;
+                        document.body.appendChild(a);
+                    }
+                    a.srcObject = stream;
+                    a.volume = parseFloat($(`vol-${sid}`)?.value ?? 0.8);
                 }
             });
+            
+            if (call.metadata?.type === 'screenshare') {
+                call.on('close', () => $(`video-${sid}-screenshare`)?.remove());
+            } else if (call.metadata?.type === 'camshare') {
+                call.on('close', () => $(`video-${sid}-camshare`)?.remove());
+            } else {
+                call.on('close', () => $(`audio-${sid}`)?.remove());
+            }
         }
-        
-        function applyBitrateLimit(call, maxBitrate) {
-            call.on('open', () => {
-                if (!call.peerConnection) return;
-                const senders = call.peerConnection.getSenders();
-                const videoSender = senders.find(s => s.track && s.track.kind === 'video');
-                if (videoSender) {
-                    const params = videoSender.getParameters();
-                    if (!params.encodings) params.encodings = [{}];
-                    params.encodings[0].maxBitrate = maxBitrate;
-                    videoSender.setParameters(params).catch(e => console.warn("Failed to set bitrate limit", e));
-                }
+
+        function removePeer(sid) {
+            if (!connections[sid] && !fileConns[sid]) return;
+            
+            authenticatedPeers.delete(sid);
+            delete connections[sid]; delete fileConns[sid];
+            
+            if (activeSounds[sid]) {
+                activeSounds[sid].forEach(a => { try { a.pause(); a.remove(); } catch(e){} });
+                delete activeSounds[sid];
+            }
+            
+            $(`audio-${sid}`)?.remove();
+            $(`video-${sid}-screenshare`)?.remove();
+            $(`video-${sid}-camshare`)?.remove();
+            
+            const name = peerNames[sid] || "Someone";
+            delete peerNames[sid]; delete lastSeen[sid]; delete lastRealPing[sid];
+            typingUsers.delete(sid); updateTypingIndicator();
+            
+            addSystemMsg(`<b>${escapeHTML(name)}</b> disconnected from mesh.`);
+            playLeaveSound();
+            $(`user-${sid}`)?.remove();
+            
+            if (Object.keys(connections).length === 0 && !isHost) {
+                $('conn-status').innerText = "Searching Peers...";
+                $('conn-status').style.color = "#f0b232";
+                $('searching-container').style.display = 'flex';
+            }
+        }
+
+        function updateTypingIndicator() {
+            const arr = Array.from(typingUsers).map(id => peerNames[id] || "Anon");
+            if (arr.length === 0) {
+                $('typing-indicator').classList.remove('active');
+                $('typing-indicator').innerText = "";
+            } else if (arr.length === 1) {
+                $('typing-indicator').innerText = `${escapeHTML(arr[0])} is typing...`;
+                $('typing-indicator').add('active');
+            } else if (arr.length === 2) {
+                $('typing-indicator').innerText = `${escapeHTML(arr[0])} and ${escapeHTML(arr[1])} are typing...`;
+                $('typing-indicator').addClass('active');
+            } else {
+                $('typing-indicator').innerText = "Several people are typing...";
+                $('typing-indicator').addClass('active');
+            }
+        }
+
+        function bcast(data) {
+            Object.values(connections).forEach(c => {
+                if (c.open && authenticatedPeers.has(c.peer)) c.send(data);
             });
         }
 
-        function removePeer(id) {
-            if (!connections[id]) return;
-            const uname = peerNames[id] || "Someone";
-            addSystemMsg(`<b>${uname}</b> left.`); playLeaveSound();
+        function enableChat() {
+            $('msg-input').disabled = false; $('send-btn').disabled = false;
             
-            if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
-
-            for (let tid in fileTransfers) {
-                if (fileTransfers[tid].senderId === id) {
-                    const msgNode = $(`msg-rx-${tid}`);
-                    if (msgNode) {
-                        msgNode.innerHTML = `<div class="msg-info">${uname}</div><div style="color: #da373c;">❌ Download Failed: User disconnected</div>`;
-                    }
-                    delete fileTransfers[tid];
-                }
-            }
-
-            ['', '-cam'].forEach(ext => { $(`video-${id}${ext}`)?.remove(); });
-            if (screenCalls[id]) { screenCalls[id].close(); delete screenCalls[id]; }
-            if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
-            $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
-            
-            delete connections[id]; delete fileConns[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
-            
-            if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
-            if (!Object.keys(connections).length) $('searching-container').style.display = 'flex';
-        }
-
-        $('cam-btn').onclick = async () => {
-            if (camStream) {
-                camStream.getTracks().forEach(t => t.stop()); Object.values(camCalls).forEach(c => c.close());
-                camCalls = {}; camStream = null; $('cam-btn').classList.remove('active'); $('video-me-cam')?.remove(); return;
-            }
-            try {
-                camStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } } 
-                });
-                const camTrack = camStream.getVideoTracks()[0];
-                if (camTrack) camTrack.contentHint = 'fluid';
-                
-                $('cam-btn').classList.add('active'); addVideoElement('me-cam', camStream, true);
-                Object.keys(connections).forEach(id => {
-                    camCalls[id] = peer.call(id, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
-                    applyBitrateLimit(camCalls[id], 500000);
-                });
-            } catch (err) { console.error(err); }
-        };
-
-        $('screen-btn').onclick = async () => {
-            if (screenStream) {
-                screenStream.getTracks().forEach(t => t.stop()); Object.values(screenCalls).forEach(c => c.close());
-                screenCalls = {}; screenStream = null; $('screen-btn').classList.remove('active'); $('video-me')?.remove(); return;
-            }
-            try {
-                screenStream = await navigator.mediaDevices.getDisplayMedia({ 
-                    video: { frameRate: { ideal: 15, max: 30 } }, 
-                    audio: true 
-                });
-                const screenTrack = screenStream.getVideoTracks()[0];
-                if (screenTrack) screenTrack.contentHint = 'detail';
-                
-                $('screen-btn').classList.add('active'); addVideoElement('me', screenStream, true);
-                screenStream.getVideoTracks()[0].onended = $('screen-btn').onclick;
-                Object.keys(connections).forEach(id => {
-                    screenCalls[id] = peer.call(id, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
-                    applyBitrateLimit(screenCalls[id], 1000000);
-                });
-            } catch (err) {}
-        };
-
-        function addVideoElement(id, stream, isLocal) {
-            if ($(`video-${id}`)) return;
-            const v = document.createElement('video');
-            v.id = `video-${id}`; 
-            v.className = 'screen-video'; 
-            v.srcObject = stream; 
-            v.autoplay = true; 
-            v.playsInline = true;
-            v.title = "Click to fullscreen";
-            if (isLocal) v.muted = true;
-            v.onclick = () => v.requestFullscreen?.();
-            v.onpause = () => v.play();
-            $('video-grid').appendChild(v);
-        }
-
-        const bcast = d => {
-            if (d.type && d.type.startsWith('file-')) {
-                Object.values(fileConns).forEach(c => c.open && c.send(d));
-            } else {
-                Object.values(connections).forEach(c => c.open && c.send(d));
-            }
-        };
-        
-        $('send-btn').onclick = () => { 
-            const t = $('msg-input').value; 
-            if(!t||!Object.keys(connections).length) return; 
-            
-            if (amITyping) { amITyping = false; clearTimeout(typingTimeout); bcast({ type: 'typing', state: false }); }
-            
-            bcast({type:'text',value:t}); 
-            addMessage(linkify(escapeHTML(t)), "You", 'mine'); 
-            $('msg-input').value = ""; 
-        };
-        $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
-
-        $('msg-input').addEventListener('input', () => {
-            if (!amITyping && $('msg-input').value.trim() !== "") {
-                amITyping = true;
-                bcast({ type: 'typing', state: true });
-            }
-            clearTimeout(typingTimeout);
-            typingTimeout = setTimeout(() => {
-                if (amITyping) {
-                    amITyping = false;
-                    bcast({ type: 'typing', state: false });
-                }
-            }, 500); 
-        });
-
-        function updateTypingUI() {
-            const ind = $('typing-indicator');
-            if (typingUsers.size === 0) {
-                ind.classList.remove('active');
-                ind.innerText = "";
-            } else {
-                ind.classList.add('active');
-                const arr = Array.from(typingUsers);
-                if (arr.length === 1) ind.innerText = `${arr[0]} is typing...`;
-                else if (arr.length === 2) ind.innerText = `${arr[0]} and ${arr[1]} are typing...`;
-                else ind.innerText = `Several people are typing...`;
-            }
-        }
-
-        let dragCounter = 0;
-        const dropOverlay = $('drop-overlay');
-
-        document.addEventListener('dragenter', e => {
-            if ($('login-screen').style.display !== 'none') return;
-            e.preventDefault();
-            dragCounter++;
-            dropOverlay.style.display = 'flex';
-        });
-
-        document.addEventListener('dragover', e => {
-            if ($('login-screen').style.display !== 'none') return;
-            e.preventDefault();
-        });
-
-        document.addEventListener('dragleave', () => {
-            if ($('login-screen').style.display !== 'none') return;
-            dragCounter--;
-            if (dragCounter === 0) dropOverlay.style.display = 'none';
-        });
-
-        document.addEventListener('drop', async e => {
-            if ($('login-screen').style.display !== 'none') return;
-            e.preventDefault();
-            dragCounter = 0;
-            dropOverlay.style.display = 'none';
-
-            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                const file = e.dataTransfer.files[0];
-                
-                if (!ALLOWED_FILE_TYPES.includes(file.type)) {
-                    return addSystemMsg("❌ Processing blocked. Media specification type unauthorized.");
-                }
-
-                if (file.type.startsWith('audio/')) {
-                    if (Object.keys(connections).length === 0) {
-                        return addSystemMsg("❌ No one is in the room to hear sounds!");
-                    }
-                    const cleanSoundName = escapeHTML(file.name);
-                    addSystemMsg(`Playing <b>${cleanSoundName}</b> to the room...`);
-                    const buffer = await file.arrayBuffer();
-                    playCustomSound(buffer, file.type, null);
-                    const url = URL.createObjectURL(new Blob([buffer], { type: file.type }));
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${cleanSoundName}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
-                    bcast({ type: 'play-sound', buffer: buffer, mime: file.type, name: file.name });
-                } else {
-                    sendFile(file);
-                }
-            }
-        });
-
-        async function sendFile(file) {
-            if (!file) return;
-            if (!ALLOWED_FILE_TYPES.includes(file.type)) {
-                return addSystemMsg("❌ Dispatch execution terminated. Media specification type unauthorized.");
-            }
-            if (Object.keys(connections).length === 0) {
-                return addSystemMsg("❌ No one is in the room to receive files!");
-            }
-            const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
-            const safeFilename = escapeHTML(filename);
-            const txId = 'tx-' + Date.now() + '-' + Math.floor(Math.random()*1000);
-            
-            activeTransfers.tx[txId] = { paused: false, canceled: false };
-
-            bcast({ type: 'file-meta', txId: txId, name: filename, fileType: file.type, size: file.size });
-            
-            const progHtml = `
-            <div>📤 Uploading <b>${safeFilename}</b>...</div>
-            <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
-            <div style="margin-top: 8px; display: flex; gap: 8px;">
-                <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
-                <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
-            </div>`;
-            addMessage(progHtml, "You", 'mine', `msg-${txId}`);
-
-            let offset = 0;
-            let chunkCount = 0;
-            const CHUNK_SIZE = 65536;
-            
-            while (offset < file.size) {
-                if (activeTransfers.tx[txId].canceled) return;
-
-                while (activeTransfers.tx[txId].paused && !activeTransfers.tx[txId].canceled) {
-                    await new Promise(r => setTimeout(r, 100));
-                }
-
-                if (activeTransfers.tx[txId].canceled) return;
-
-                if (Object.keys(connections).length === 0) {
-                    const msgNode = $(`msg-${txId}`);
-                    if (msgNode) {
-                        msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Failed: Everyone left the room</div>`;
-                    }
-                    return; 
-                }
-
-                // Calculate current backpressure threshold dynamically
-                let backpressure = false;
-                for (let c of Object.values(fileConns)) {
-                    if (c.open && c.dataChannel && c.dataChannel.bufferedAmount > CHUNK_SIZE * 8) { 
-                        backpressure = true;
-                        break;
-                    }
-                }
-                
-                // If data channels are choked, sleep until buffers clear out to prevent crashes on large files
-                if (backpressure) {
-                    await new Promise(r => setTimeout(r, 30));
-                    continue; 
-                }
-
-                const buffer = await readChunkViaWorker(file, offset, CHUNK_SIZE, txId, chunkCount);
-                bcast({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer }); 
-                
-                offset += CHUNK_SIZE;
-                chunkCount++;
-
-                const bar = $(`bar-${txId}`);
-                if (bar) bar.style.width = `${Math.min((offset / file.size) * 100, 100)}%`;
-
-                if (chunkCount % 10 === 0) await new Promise(r => setTimeout(r, 1));
-            }
-            
-            if (!activeTransfers.tx[txId].canceled) {
-                const msgNode = $(`msg-${txId}`);
-                if (msgNode) msgNode.remove();
-
-                const url = URL.createObjectURL(file);
-                if (file.type.startsWith('image/')) {
-                    addMessage(`<img src="${url}"><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
-                } else if (file.type.startsWith('video/')) {
-                    addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download Video</a>`, "You", 'mine');
-                } else if (file.type.startsWith('audio/')) {
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
-                } else {
-                    addMessage(`<div>📂 Shared: ${safeFilename}</div><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download File</a>`, "You", 'mine');
-                }
-            }
-
-            delete activeTransfers.tx[txId];
-        }
-
-        $('file-input').onchange = () => {
-            sendFile($('file-input').files[0]);
-            $('file-input').value = "";
-        };
-
-        document.addEventListener('paste', (e) => {
-            if (e.clipboardData && e.clipboardData.files.length > 0) {
-                const file = e.clipboardData.files[0];
-                if (file.type.startsWith('image/') || file.type.startsWith('video/')) {
-                    const ext = file.type.split('/')[1] || 'bin';
-                    const pastedFile = new File([file], `Pasted Media - ${new Date().toLocaleTimeString()}.${ext}`, { type: file.type });
-                    sendFile(pastedFile);
-                }
-            }
-        });
-
-        $('soundboard-input').onchange = async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            if (!file.type.startsWith('audio/')) {
-                return addSystemMsg("❌ Sound configuration out of compliance specifications.");
-            }
-            
-            waitingForKeyBind = { buffer: await file.arrayBuffer(), mime: file.type, name: file.name };
-            const cleanWaitName = escapeHTML(file.name);
-            addSystemMsg(`Press a <b>Numpad key (0-9)</b> to bind the sound <b>${cleanWaitName}</b>...`);
-            e.target.value = "";
-        };
-
-        document.addEventListener('keydown', (e) => {
-            if ($('login-screen').style.display !== 'none') return;
-            
-            if ((e.key === '*' && e.target.tagName !== 'INPUT') || e.code === 'NumpadMultiply') {
-                for (let k in soundboard) delete soundboard[k];
-                waitingForKeyBind = null;
-                addSystemMsg("🧹 Cleared all Numpad sound bindings.");
-                return;
-            }
-
-            const match = e.code.match(/^Numpad(\d)$/);
-            if (!match) return;
-            const num = match[1];
-
-            if (waitingForKeyBind) {
-                soundboard[num] = waitingForKeyBind;
-                addSystemMsg(`🎵 Bound <b>${escapeHTML(waitingForKeyBind.name)}</b> to Numpad <b>${num}</b>.`);
-                waitingForKeyBind = null;
-                return;
-            }
-
-            if (soundboard[num]) {
-                if (Object.keys(connections).length === 0) {
-                    return addSystemMsg("❌ No one is in the room to hear that!");
-                }
-                const safeSndName = escapeHTML(soundboard[num].name);
-                playCustomSound(soundboard[num].buffer, soundboard[num].mime, null);
-                const url = URL.createObjectURL(new Blob([soundboard[num].buffer], { type: soundboard[num].mime }));
-                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${safeSndName}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
-                bcast({ type: 'play-sound', buffer: soundboard[num].buffer, mime: soundboard[num].mime, name: soundboard[num].name });
-            }
-        });
-
-        function playCustomSound(buffer, mime, senderId) {
-            try {
-                const blob = new Blob([buffer], { type: mime });
-                const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
-                
-                if (senderId) {
-                    if (activeSounds[senderId] && activeSounds[senderId].length >= MAX_CONCURRENT_SOUNDS_PER_PEER) {
-                        const oldestAudio = activeSounds[senderId].shift();
-                        if (oldestAudio) {
-                            oldestAudio.pause();
-                            oldestAudio.src = "";
+            // Background mesh health checks
+            window.healthCheckInterval = setInterval(() => {
+                const now = Date.now();
+                Object.keys(connections).forEach(sid => {
+                    if (now - (lastSeen[sid] || 0) > 12000) {
+                        console.warn(`Peer ${sid} stale signature interval timeout.`);
+                        removePeer(sid);
+                        connections[sid]?.close();
+                    } else {
+                        if (connections[sid]?.open && authenticatedPeers.has(sid)) {
+                            connections[sid].send({ type: 'ping', ts: Date.now() });
                         }
                     }
+                });
+            }, 3000);
 
-                    const volSlider = $(`vol-${senderId}`);
-                    if (volSlider) {
-                        audio.volume = parseFloat(volSlider.value);
-                    }
-                    
-                    const muteIcon = $(`mute-icon-${senderId}`);
-                    if (muteIcon && muteIcon.innerText === "🔇") {
-                        audio.muted = true;
-                    }
-
-                    if (!activeSounds[senderId]) activeSounds[senderId] = [];
-                    activeSounds[senderId].push(audio);
-                }
-
-                audio.play().catch(err => console.log("Sound play prevented:", err));
-                audio.onended = () => {
-                    URL.revokeObjectURL(url); 
-                    if (senderId && activeSounds[senderId]) {
-                        activeSounds[senderId] = activeSounds[senderId].filter(a => a !== audio);
-                    }
-                };
-            } catch (err) {}
-        }
-
-        setInterval(() => {
-            if (isHost) { const peers = Object.keys(connections); if(peers.length) bcast({ type: 'mesh-sync', peers }); }
-            else if (ROOM_ID && !connections[ROOM_ID]) connectToPeer(ROOM_ID);
-        }, 3000);
-
-        setInterval(() => {
-            bcast({ type: 'ping', time: Date.now() });
-        }, 1000);
-
-        setInterval(() => {
-            const now = Date.now();
-            Object.keys(connections).forEach(id => {
-                const elapsed = now - (lastSeen[id] || now);
-                
-                if (elapsed > 10000) {
-                    removePeer(id);
-                } else if (elapsed > 1000) {
-                    const basePing = lastRealPing[id] || 0;
-                    const simulatedPing = Math.floor(basePing + (elapsed - 1000));
-                    updatePingUI(id, simulatedPing);
-                }
+            // Drag & Drop Listeners Setup
+            window.addEventListener('dragenter', e => { e.preventDefault(); $('drop-overlay').style.display = 'flex'; });
+            $('drop-overlay').addEventListener('dragleave', e => { e.preventDefault(); $('drop-overlay').style.display = 'none'; });
+            window.addEventListener('dragover', e => e.preventDefault());
+            window.addEventListener('drop', e => {
+                e.preventDefault();
+                $('drop-overlay').style.display = 'none';
+                if (e.dataTransfer.files.length) handleFileSelect(e.dataTransfer.files[0]);
             });
-        }, 100);
 
-        function updatePingUI(id, lat) { 
-            const p = $(`ping-${id}`); 
-            const dot = $(`status-dot-${id}`);
-            
-            if(p){ 
-                p.innerText = `${lat}ms`; 
-                p.className = `ping-display ${lat<100?'ping-good':lat<300?'ping-med':'ping-bad'}`; 
-            }
-            if(dot && id !== 'me'){ 
-                dot.className = `status-dot ${lat<100?'dot-good':lat<300?'dot-med':'dot-bad'}`;
-            }
-        }
-
-        function enableChat() { $('msg-input').disabled = $('send-btn').disabled = false; }
-        $('logout-btn').onclick = () => { if(peer) peer.destroy(); location.reload(); };
-
-        function addMessage(html, user, type, msgId = null) { 
-            const d = document.createElement('div'); 
-            d.className = `msg ${type}`; 
-            if (msgId) d.id = msgId;
-            d.innerHTML = `<div class="msg-info">${user}</div><div>${html}</div>`; 
-            $('messages').appendChild(d); 
-            
-            const scrollToBottom = () => $('messages').scrollTop = $('messages').scrollHeight;
-            scrollToBottom(); 
-
-            const medias = d.querySelectorAll('img, video, audio');
-            medias.forEach(m => {
-                m.onload = m.onloadedmetadata = scrollToBottom; 
+            // Clipboard Paste Listener Setup
+            window.addEventListener('paste', e => {
+                if (e.clipboardData.files.length) handleFileSelect(e.clipboardData.files[0]);
             });
         }
-        
-        function addSystemMsg(txt) { 
-            const d = document.createElement('div'); 
-            d.style.cssText = "text-align:center;font-size:12px;font-weight:500;color:#949ba4;margin:10px 0"; 
-            d.innerHTML = txt; 
-            $('messages').appendChild(d);
+
+        $('send-btn').onclick = () => {
+            const val = $('msg-input').value.trim();
+            if (!val) return;
+            bcast({ type: 'chat', value: val });
+            addMessage(linkify(escapeHTML(val)), myName || "You", 'mine');
+            $('msg-input').value = "";
+            if(amITyping) { amITyping = false; bcast({ type: 'typing', isTyping: false }); }
+        };
+        $('msg-input').onkeydown = () => {
+            if (!amITyping) { amITyping = true; bcast({ type: 'typing', isTyping: true }); }
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {
+                amITyping = false;
+                bcast({ type: 'typing', isTyping: false });
+            }, 2000);
+        };
+        $('msg-input').addEventListener('keypress', e => { if(e.key === 'Enter') $('send-btn').click(); });
+
+        function addMessage(html, sender, side, customId) {
+            const box = document.createElement('div');
+            box.className = `msg ${side}`;
+            if (customId) box.id = customId;
+            box.innerHTML = `<div class="msg-info">${escapeHTML(sender)}</div><div>${html}</div>`;
+            $('messages').appendChild(box);
             $('messages').scrollTop = $('messages').scrollHeight;
         }
 
-        function addUserToSidebar(name, id) {
-            if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
-            const d = document.createElement('div'); d.className = 'user-item'; d.id = `sidebar-${id}`;
-            
-            let right = "";
-            if (id === "me") {
-                right = `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="my-mic-toggle" style="font-size:14px;cursor:pointer;user-select:none;transition:0.2s;" title="Toggle Mic">🎤</span></div>`;
+        function addSystemMsg(html) {
+            const box = document.createElement('div');
+            box.style.alignSelf = 'center';
+            box.style.background = 'rgba(255,255,255,0.05)';
+            box.style.fontSize = '13px';
+            box.style.padding = '6px 16px';
+            box.style.borderRadius = '12px';
+            box.style.color = '#b5bac1';
+            box.innerHTML = html;
+            $('messages').appendChild(box);
+            $('messages').scrollTop = $('messages').scrollHeight;
+        }
+
+        function addUserToSidebar(name, type, id) {
+            if (id && $(`user-${id}`)) return;
+            const item = document.createElement('div');
+            item.className = 'user-item';
+            if (id) item.id = `user-${id}`;
+
+            let controlHtml = "";
+            if (type === "me") {
+                controlHtml = `<span class="status-dot dot-good" id="dot-me"></span>`;
             } else {
-                right = `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="mute-icon-${id}" style="font-size:14px;opacity:0.8;cursor:pointer;user-select:none;transition:0.2s;" title="Mute/Unmute">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
+                controlHtml = `
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span class="ping-display ping-good" id="ping-${id}">--ms</span>
+                        <input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="0.8">
+                        <span class="status-dot dot-good" id="dot-${id}"></span>
+                    </div>`;
             }
 
-            d.innerHTML = `<div class="user-left"><div id="status-dot-${id}" class="status-dot dot-good"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
-            $('user-list').appendChild(d);
+            item.innerHTML = `
+                <div class="user-left">
+                    <span style="font-size: 16px;">👤</span>
+                    <span style="overflow: hidden; text-overflow: ellipsis;">${escapeHTML(name)}</span>
+                </div>
+                ${controlHtml}`;
             
-            if (id === "me") {
-                const myMicToggle = $('my-mic-toggle');
-                if (!localStream) {
-                    myMicToggle.style.display = 'none'; 
-                } else {
-                    myMicToggle.onclick = () => {
-                        isMuted = !isMuted;
-                        localStream.getAudioTracks()[0].enabled = !isMuted;
-                        myMicToggle.innerText = isMuted ? "🔇" : "🎤";
-                        myMicToggle.style.opacity = isMuted ? "0.5" : "1";
-                    };
-                }
-            } else {
-                const muteIcon = $(`mute-icon-${id}`);
-                const volSlider = $(`vol-${id}`);
+            $('user-list').appendChild(item);
+
+            if (type !== "me" && id) {
                 let isUserMuted = false;
-                let previousVolume = 1;
-
+                let previousVolume = 0.8;
+                const volSlider = $(`vol-${id}`);
+                const muteIcon = item.querySelector('.user-left span');
+                
+                muteIcon.style.cursor = 'pointer';
                 muteIcon.onclick = () => {
-                    isUserMuted = !isUserMuted;
-                    muteIcon.innerText = isUserMuted ? "🔇" : "🔊";
-                    muteIcon.style.opacity = isUserMuted ? "0.5" : "0.8";
-                    
                     const a = $(`audio-${id}`);
-
-                    if (isUserMuted) {
-                        previousVolume = parseFloat(volSlider.value) > 0 ? parseFloat(volSlider.value) : 1;
+                    if (!isUserMuted) {
+                        isUserMuted = true;
+                        previousVolume = parseFloat(volSlider.value) || 0.8;
                         volSlider.value = 0;
-                        if (a) { a.muted = true; a.volume = 0; }
-                        if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = true; snd.volume = 0; });
+                        muteIcon.innerText = "🔇";
+                        muteIcon.style.opacity = "0.5";
+                        if (a) a.muted = true;
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = true);
                     } else {
+                        isUserMuted = false;
                         volSlider.value = previousVolume;
+                        muteIcon.innerText = "👤";
+                        muteIcon.style.opacity = "1";
                         if (a) { a.muted = false; a.volume = previousVolume; }
                         if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = false; snd.volume = previousVolume; });
                     }
@@ -1192,14 +985,157 @@
                     } 
                     else if (isUserMuted && vol > 0) {
                         isUserMuted = false;
-                        muteIcon.innerText = "🔊";
-                        muteIcon.style.opacity = "0.8";
+                        muteIcon.innerText = "👤";
+                        muteIcon.style.opacity = "1";
                         if (a) a.muted = false;
                         if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = false);
                     }
                 });
             }
         }
+
+        function updateUserInSidebar(id, safeName) {
+            const item = $(`user-${id}`);
+            if (item) {
+                const label = item.querySelector('.user-left span:last-child');
+                if (label) label.innerText = safeName;
+            } else {
+                addUserToSidebar(safeName, "peer", id);
+            }
+        }
+
+        // --- Core File Handling logic ---
+        async function handleFileSelect(file) {
+            if (!ALLOWED_FILE_TYPES.includes(file.type)) {
+                return addSystemMsg("❌ Processing blocked. Media specification type unauthorized.");
+            }
+
+            const txId = crypto.randomUUID();
+            const chunkSize = 16384; 
+            
+            // Soundboard injection pathway logic
+            if (window.soundboardModeActive) {
+                if (!file.type.startsWith('audio/')) {
+                    return addSystemMsg("❌ Sound configuration out of compliance specifications.");
+                }
+                const localUrl = URL.createObjectURL(file);
+                bcast({ type: 'sound', url: localUrl });
+                addSystemMsg(`🎵 Played soundboard element: <b>${escapeHTML(file.name)}</b>`);
+                window.soundboardModeActive = false;
+                $('soundboard-input').value = "";
+                return;
+            }
+
+            // Standard DataChannel Stream Allocation Logic
+            const safeName = escapeHTML(file.name);
+            const progHtml = `
+                <div>📤 Uploading <b>${safeName}</b>...</div>
+                <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
+                <div style="margin-top: 8px; display: flex; gap: 8px;">
+                    <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
+                    <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
+                </div>`;
+            addMessage(progHtml, "You", 'mine', `msg-${txId}`);
+
+            activeTransfers.tx[txId] = { file, paused: false, canceled: false };
+
+            // Synchronize control streams with destination endpoints
+            Object.keys(fileConns).forEach(async peerId => {
+                const fConn = fileConns[peerId];
+                if (!fConn || !fConn.open || !authenticatedPeers.has(peerId)) return;
+
+                fConn.send({ type: 'file-meta', txId, name: file.name, size: file.size, fileType: file.type });
+
+                let offset = 0;
+                let index = 0;
+
+                const sendNextChunk = async () => {
+                    const tx = activeTransfers.tx[txId];
+                    if (!tx || tx.canceled || !fConn.open) return;
+
+                    if (tx.paused) {
+                        setTimeout(sendNextChunk, 200);
+                        return;
+                    }
+
+                    if (offset < file.size) {
+                        try {
+                            const buffer = await readChunkViaWorker(tx.file, offset, chunkSize, txId, index);
+                            if (tx.canceled || !fConn.open) return;
+                            
+                            fConn.send({ type: 'file-chunk', txId, index, data: buffer });
+                            offset += chunkSize;
+                            index++;
+
+                            const bar = $(`bar-${txId}`);
+                            if (bar) bar.style.width = `${Math.min((offset / file.size) * 100, 100)}%`;
+                            
+                            // Prevent event loop starvation via short timeouts
+                            setTimeout(sendNextChunk, 1);
+                        } catch (err) {
+                            console.error("Worker read failed:", err);
+                        }
+                    } else {
+                        const msgNode = $(`msg-${txId}`);
+                        if (msgNode) msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #23a559;">✅ File sent successfully</div>`;
+                        setTimeout(() => msgNode?.remove(), 5000);
+                    }
+                };
+                sendNextChunk();
+            });
+            $('file-input').value = "";
+        }
+
+        $('file-input').onchange = e => { if (e.target.files.length) handleFileSelect(e.target.files[0]); };
+        $('soundboard-input').onchange = e => { if (e.target.files.length) { window.soundboardModeActive = true; handleFileSelect(e.target.files[0]); } };
+
+        // Webcam/Screen Toggle and Mute Button Handlers
+        let isCamActive = false;
+        $('cam-btn').onclick = async () => {
+            if (!isCamActive) {
+                try {
+                    camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                    isCamActive = true;
+                    $('cam-btn').classList.add('active');
+                    addSystemMsg("📷 Webcam activated.");
+                    Object.keys(connections).forEach(pId => {
+                        if (authenticatedPeers.has(pId)) camCalls[pId] = peer.call(pId, camStream, { metadata: { type: 'camshare' } });
+                    });
+                } catch(e) { alert("Webcam access rejected."); }
+            } else {
+                isCamActive = false;
+                $('cam-btn').classList.remove('active');
+                camStream.getTracks().forEach(t => t.stop());
+                Object.values(camCalls).forEach(c => c.close());
+                camCalls = {};
+                addSystemMsg("📷 Webcam deactivated.");
+            }
+        };
+
+        let isScreenActive = false;
+        $('screen-btn').onclick = async () => {
+            if (!isScreenActive) {
+                try {
+                    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+                    isScreenActive = true;
+                    $('screen-btn').classList.add('active');
+                    addSystemMsg("🖥️ Screen share active.");
+                    Object.keys(connections).forEach(pId => {
+                        if (authenticatedPeers.has(pId)) screenCalls[pId] = peer.call(pId, screenStream, { metadata: { type: 'screenshare' } });
+                    });
+                    screenStream.getVideoTracks()[0].onended = () => { if(isScreenActive) $('screen-btn').click(); };
+                } catch(e) { console.error(e); }
+            } else {
+                isScreenActive = false;
+                $('screen-btn').classList.remove('active');
+                screenStream.getTracks().forEach(t => t.stop());
+                Object.values(screenCalls).forEach(c => c.close());
+                screenCalls = {};
+                addSystemMsg("🖥️ Screen share closed.");
+            }
+        };
+
+        $('logout-btn').onclick = () => { window.location.reload(); };
     </script>
 </body>
 </html>
