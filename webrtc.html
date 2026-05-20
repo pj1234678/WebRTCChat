@@ -124,6 +124,7 @@
         <p style="color:#949ba4; margin-top: 0; margin-bottom: 5px; font-weight: 500;">Multi-User Conference Room</p>
         <p id="online-users" style="color:#23a559; font-size: 13px; font-weight: 600; margin-top: 0; margin-bottom: 25px;">Checking room status...</p>
         <input type="text" id="username" placeholder="Your Name">
+        <input type="text" id="room-name" placeholder="Room Name" style="margin-bottom: 12px;">
         <input type="password" id="room-pass" placeholder="Room Password">
         <button id="join-btn">Join Room</button>
     </div>
@@ -136,7 +137,7 @@
         <div id="user-list"></div>
         <div id="searching-container">
             <div class="radar"></div>
-            <div>Waiting for peers...<br><span style="font-size:11px; opacity:0.7;">Share password to invite</span></div>
+            <div>Waiting for peers...<br><span style="font-size:11px; opacity:0.7;">Share credentials to invite</span></div>
         </div>
         <div class="sidebar-footer">
             <div style="color: #949ba4; font-size: 12px; font-weight: 500; text-align: center; background: #111214; padding: 8px; border-radius: 8px;">Network: <span id="conn-status" style="color: #f0b232;">Connecting...</span></div>
@@ -218,7 +219,7 @@
             });
         };
 
-        let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
+        let myName = "", myId = "", isHost = false, peer, ROOM_ID = "", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         
         const connections = {}, fileConns = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};
@@ -232,6 +233,15 @@
         let typingTimeout = null;
         const typingUsers = new Set();
         let tempPeer = null;
+
+        // Security Guardrails Configuration
+        const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB Max upload payload size
+        const MAX_CONCURRENT_SOUNDS_PER_PEER = 3; // Prevent audio flooding
+        const ALLOWED_FILE_TYPES = [
+            'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+            'video/mp4', 'video/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/mp3',
+            'application/pdf', 'text/plain', 'application/zip', 'application/x-zip-compressed'
+        ];
 
         // --- File Control State Variables ---
         const activeTransfers = { tx: {} };
@@ -321,12 +331,35 @@
             setTimeout(() => p.remove(), 1000);
         });
 
+        // Cryptographically secure hash generation for Dynamic Room Routing using SHA-384
+        async function generateRoomHash(roomName, password) {
+            const encoder = new TextEncoder();
+            const saltMaterial = encoder.encode(roomName.toLowerCase().trim());
+            const passwordMaterial = encoder.encode(password.trim());
+            
+            const combinedMaterial = new Uint8Array(saltMaterial.length + passwordMaterial.length);
+            combinedMaterial.set(saltMaterial);
+            combinedMaterial.set(passwordMaterial, saltMaterial.length);
+
+            const hashBuffer = await crypto.subtle.digest('SHA-384', combinedMaterial);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+            return `superconf-mesh-${hashHex.substring(0, 32)}`;
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             tempPeer = new Peer(peerConfig);
             
-            const doCheck = () => {
+            const doCheck = async () => {
                 if(!tempPeer || tempPeer.destroyed || tempPeer.disconnected) return;
-                const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true }, reliable: true });
+                const rName = $('room-name').value.trim();
+                const rPass = $('room-pass').value.trim();
+                if (!rName || !rPass) {
+                    $('online-users').innerText = "Enter credentials to check status";
+                    return;
+                }
+                const targetRoomId = await generateRoomHash(rName, rPass);
+                const pConn = tempPeer.connect(targetRoomId, { metadata: { isPing: true }, reliable: true });
                 let gotResp = false;
                 
                 pConn.on('open', () => { pConn.send({ type: 'get-count' }); });
@@ -351,7 +384,7 @@
 
             tempPeer.on('open', () => {
                 doCheck();
-                window.loginPingInterval = setInterval(doCheck, 3000);
+                window.loginPingInterval = setInterval(doCheck, 4000);
             });
             tempPeer.on('error', () => {
                 $('online-users').innerText = "🟢 0 Users Online";
@@ -369,16 +402,40 @@
         });
 
         const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
-        $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
+        $('username').addEventListener('keypress', trig); $('room-name').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
         const escapeHTML = s => s.replace(/[&<>'"]/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[t]));
-        const linkify = s => s.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank">${url}</a>`);
+        
+        // Defensive non-executable Linkify implementation using safe DOM parsing
+        function linkify(escapedStr) {
+            const container = document.createElement('div');
+            const urlRegex = /(https?:\/\/[^\s]+)/g;
+            const parts = escapedStr.split(urlRegex);
+            
+            parts.forEach(part => {
+                if (part.match(urlRegex)) {
+                    const anchor = document.createElement('a');
+                    anchor.href = part;
+                    anchor.target = '_blank';
+                    anchor.rel = 'noopener noreferrer';
+                    anchor.textContent = part;
+                    container.appendChild(anchor);
+                } else {
+                    container.appendChild(document.createTextNode(part));
+                }
+            });
+            return container.innerHTML;
+        }
 
         $('join-btn').onclick = async () => {
+            const rName = $('room-name').value.trim();
+            const rPass = $('room-pass').value.trim();
+            if (!rName || !rPass) return alert("Please supply both a Room Name and Room Password.");
+
             if (window.loginPingInterval) clearInterval(window.loginPingInterval);
             if (tempPeer && !tempPeer.destroyed) { tempPeer.destroy(); }
             
             myName = $('username').value.trim() || "Anon";
-            if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
+            ROOM_ID = await generateRoomHash(rName, rPass);
             
             if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
                 Notification.requestPermission();
@@ -490,10 +547,16 @@
                         }
                     }
                     else if (data.type === 'file-meta') { 
+                        // Receiver Validation Parameters
+                        if (data.size > MAX_FILE_SIZE || !ALLOWED_FILE_TYPES.includes(data.fileType)) {
+                            conn.send({ type: 'file-control-rx', txId: data.txId, action: 'cancel' });
+                            return;
+                        }
+
                         const txId = data.txId;
                         fileTransfers[txId] = { meta: data, chunks: [], received: 0, senderId: sid, paused: false }; 
                         const progHtml = `
-                        <div>📥 Downloading <b>${data.name}</b>...</div>
+                        <div>📥 Downloading <b>${escapeHTML(data.name)}</b>...</div>
                         <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
                         <div style="margin-top: 8px; display: flex; gap: 8px;">
                             <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
@@ -504,6 +567,12 @@
                     else if (data.type === 'file-chunk') {
                         const tr = fileTransfers[data.txId]; if(!tr) return;
                         
+                        // Security drop logic if payload expands past bounds during transfer
+                        if (tr.received + data.data.byteLength > MAX_FILE_SIZE) {
+                            window.cancelRx(data.txId, sid);
+                            return;
+                        }
+
                         // Properly index array instead of unreliably pushing
                         tr.chunks[data.index] = data.data; 
                         tr.received += data.data.byteLength;
@@ -515,17 +584,18 @@
                             const msgNode = $(`msg-rx-${data.txId}`);
                             if (msgNode) msgNode.remove();
 
+                            const safeName = escapeHTML(tr.meta.name);
                             const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
                             const senderName = peerNames[sid] || "Someone";
 
                             if (tr.meta.fileType.startsWith('image/')) {
-                                addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
+                                addMessage(`<img src="${url}"><a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
                             } else if (tr.meta.fileType.startsWith('video/')) {
-                                addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
+                                addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
                             } else if (tr.meta.fileType.startsWith('audio/')) {
-                                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
+                                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
                             } else {
-                                addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
+                                addMessage(`<div>📂 ${safeName}</div><a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
                             }
 
                             playJoinSound();
@@ -586,10 +656,14 @@
                     updatePingUI(sid, lat);
                 }
                 else if (data.type === 'play-sound') { 
+                    if (data.buffer && data.buffer.byteLength > MAX_FILE_SIZE) return;
+                    if (!ALLOWED_FILE_TYPES.includes(data.mime) || !data.mime.startsWith('audio/')) return;
+                    
+                    const safeSoundName = escapeHTML(data.name || 'sound');
                     playCustomSound(data.buffer, data.mime, sid); 
                     addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
                     const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${safeSoundName}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
                 }
             });
             conn.on('close', () => removePeer(conn.peer)); conn.on('error', () => removePeer(conn.peer));
@@ -795,15 +869,24 @@
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                 const file = e.dataTransfer.files[0];
                 
+                // Assert incoming constraints before processing
+                if (file.size > MAX_FILE_SIZE) {
+                    return addSystemMsg(`❌ Processing blocked. Attachment exceeds structural threshold (${MAX_FILE_SIZE / (1024 * 1024)}MB).`);
+                }
+                if (!ALLOWED_FILE_TYPES.includes(file.type)) {
+                    return addSystemMsg("❌ Processing blocked. Media specification type unauthorized.");
+                }
+
                 if (file.type.startsWith('audio/')) {
                     if (Object.keys(connections).length === 0) {
                         return addSystemMsg("❌ No one is in the room to hear sounds!");
                     }
-                    addSystemMsg(`Playing <b>${file.name}</b> to the room...`);
+                    const cleanSoundName = escapeHTML(file.name);
+                    addSystemMsg(`Playing <b>${cleanSoundName}</b> to the room...`);
                     const buffer = await file.arrayBuffer();
                     playCustomSound(buffer, file.type, null);
                     const url = URL.createObjectURL(new Blob([buffer], { type: file.type }));
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${file.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${cleanSoundName}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                     bcast({ type: 'play-sound', buffer: buffer, mime: file.type, name: file.name });
                 } else {
                     sendFile(file);
@@ -813,10 +896,14 @@
 
         async function sendFile(file) {
             if (!file) return;
+            if (file.size > MAX_FILE_SIZE || !ALLOWED_FILE_TYPES.includes(file.type)) {
+                return addSystemMsg("❌ Dispatch execution terminated. Attachment parameters out of bounds.");
+            }
             if (Object.keys(connections).length === 0) {
                 return addSystemMsg("❌ No one is in the room to receive files!");
             }
             const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
+            const safeFilename = escapeHTML(filename);
             const txId = 'tx-' + Date.now() + '-' + Math.floor(Math.random()*1000);
             
             // Register Sender Tx Block
@@ -825,7 +912,7 @@
             bcast({ type: 'file-meta', txId: txId, name: filename, fileType: file.type, size: file.size });
             
             const progHtml = `
-            <div>📤 Uploading <b>${filename}</b>...</div>
+            <div>📤 Uploading <b>${safeFilename}</b>...</div>
             <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
             <div style="margin-top: 8px; display: flex; gap: 8px;">
                 <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
@@ -888,13 +975,13 @@
 
                 const url = URL.createObjectURL(file);
                 if (file.type.startsWith('image/')) {
-                    addMessage(`<img src="${url}"><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
+                    addMessage(`<img src="${url}"><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
                 } else if (file.type.startsWith('video/')) {
-                    addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Video</a>`, "You", 'mine');
+                    addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download Video</a>`, "You", 'mine');
                 } else if (file.type.startsWith('audio/')) {
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                 } else {
-                    addMessage(`<div>📂 Shared: ${filename}</div><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download File</a>`, "You", 'mine');
+                    addMessage(`<div>📂 Shared: ${safeFilename}</div><a href="${url}" download="${safeFilename}" class="chat-media-link">${dlIcon} Download File</a>`, "You", 'mine');
                 }
             }
 
@@ -920,9 +1007,14 @@
         $('soundboard-input').onchange = async (e) => {
             const file = e.target.files[0];
             if (!file) return;
+
+            if (file.size > MAX_FILE_SIZE || !file.type.startsWith('audio/')) {
+                return addSystemMsg("❌ Sound configuration out of compliance specifications.");
+            }
             
             waitingForKeyBind = { buffer: await file.arrayBuffer(), mime: file.type, name: file.name };
-            addSystemMsg(`Press a <b>Numpad key (0-9)</b> to bind the sound <b>${file.name}</b>...`);
+            const cleanWaitName = escapeHTML(file.name);
+            addSystemMsg(`Press a <b>Numpad key (0-9)</b> to bind the sound <b>${cleanWaitName}</b>...`);
             e.target.value = "";
         };
 
@@ -942,7 +1034,7 @@
 
             if (waitingForKeyBind) {
                 soundboard[num] = waitingForKeyBind;
-                addSystemMsg(`🎵 Bound <b>${waitingForKeyBind.name}</b> to Numpad <b>${num}</b>.`);
+                addSystemMsg(`🎵 Bound <b>${escapeHTML(waitingForKeyBind.name)}</b> to Numpad <b>${num}</b>.`);
                 waitingForKeyBind = null;
                 return;
             }
@@ -951,9 +1043,10 @@
                 if (Object.keys(connections).length === 0) {
                     return addSystemMsg("❌ No one is in the room to hear that!");
                 }
+                const safeSndName = escapeHTML(soundboard[num].name);
                 playCustomSound(soundboard[num].buffer, soundboard[num].mime, null);
                 const url = URL.createObjectURL(new Blob([soundboard[num].buffer], { type: soundboard[num].mime }));
-                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${soundboard[num].name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
+                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${safeSndName}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                 bcast({ type: 'play-sound', buffer: soundboard[num].buffer, mime: soundboard[num].mime, name: soundboard[num].name });
             }
         });
@@ -965,6 +1058,15 @@
                 const audio = new Audio(url);
                 
                 if (senderId) {
+                    // Capping active concurrent audio playback entities to insulate system audio threads
+                    if (activeSounds[senderId] && activeSounds[senderId].length >= MAX_CONCURRENT_SOUNDS_PER_PEER) {
+                        const oldestAudio = activeSounds[senderId].shift();
+                        if (oldestAudio) {
+                            oldestAudio.pause();
+                            oldestAudio.src = "";
+                        }
+                    }
+
                     const volSlider = $(`vol-${senderId}`);
                     if (volSlider) {
                         audio.volume = parseFloat(volSlider.value);
@@ -992,7 +1094,7 @@
 
         setInterval(() => {
             if (isHost) { const peers = Object.keys(connections); if(peers.length) bcast({ type: 'mesh-sync', peers }); }
-            else if (!connections[ROOM_ID]) connectToPeer(ROOM_ID);
+            else if (ROOM_ID && !connections[ROOM_ID]) connectToPeer(ROOM_ID);
         }, 3000);
 
         setInterval(() => {
