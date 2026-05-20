@@ -122,7 +122,7 @@
     <div id="login-screen">
         <h1>🚀 Super Mesh Chat</h1>
         <p style="color:#949ba4; margin-top: 0; margin-bottom: 5px; font-weight: 500;">Multi-User Conference Room</p>
-        <p id="online-users" style="color:#23a559; font-size: 13px; font-weight: 600; margin-top: 0; margin-bottom: 25px;">Checking room status...</p>
+        <p id="online-users" style="color:#23a559; font-size: 13px; font-weight: 600; margin-top: 0; margin-bottom: 25px;">Enter password to check room...</p>
         <input type="text" id="username" placeholder="Your Name">
         <input type="password" id="room-pass" placeholder="Room Password">
         <button id="join-btn">Join Room</button>
@@ -176,6 +176,14 @@
         const playBeep = (freq, type) => { try { const ctx=new(window.AudioContext||window.webkitAudioContext)({ latencyHint: 'interactive' }),osc=ctx.createOscillator(),g=ctx.createGain();osc.type=type;osc.frequency.value=freq;g.gain.setValueAtTime(0.05,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.connect(g);g.connect(ctx.destination);osc.start();osc.stop(ctx.currentTime+0.3); } catch(e){} };
         const playJoinSound = () => playBeep(880, 'sine'), playLeaveSound = () => playBeep(440, 'triangle'); 
 
+        // Crypto Hashing Setup for Room ID and Challenge-Response Authentication
+        async function hashString(str) {
+            const msgUint8 = new TextEncoder().encode(str);
+            const hashBuffer = await crypto.subtle.digest('SHA-384', msgUint8);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
         // SDP Munging for Forward Error Correction and DTX (Trick 1)
         function mungeSDP(sdp) {
             const match = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i);
@@ -218,7 +226,8 @@
             });
         };
 
-        let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
+        let hashedPass = "", ROOM_ID = "";
+        let myName = "", myId = "", isHost = false, peer, localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         
         const connections = {}, fileConns = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};
@@ -324,14 +333,24 @@
         window.addEventListener('DOMContentLoaded', () => {
             tempPeer = new Peer(peerConfig);
             
-            const doCheck = () => {
-                if(!tempPeer || tempPeer.destroyed || tempPeer.disconnected) return;
+            window.doCheck = () => {
+                if(!tempPeer || tempPeer.destroyed || tempPeer.disconnected || !ROOM_ID || !hashedPass) return;
                 const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true }, reliable: true });
                 let gotResp = false;
+                let myNonce = crypto.randomUUID();
                 
-                pConn.on('open', () => { pConn.send({ type: 'get-count' }); });
-                pConn.on('data', d => {
-                    if (d.type === 'count-resp') {
+                pConn.on('open', () => { pConn.send({ type: 'auth-challenge', nonce: myNonce }); });
+                pConn.on('data', async d => {
+                    if (d.type === 'auth-challenge') {
+                        pConn.send({ type: 'auth-response', hash: await hashString(d.nonce + hashedPass) });
+                    } else if (d.type === 'auth-response') {
+                        const expected = await hashString(myNonce + hashedPass);
+                        if (d.hash === expected) {
+                            pConn.send({ type: 'get-count' });
+                        } else {
+                            pConn.close();
+                        }
+                    } else if (d.type === 'count-resp') {
                         gotResp = true;
                         const count = d.count;
                         $('online-users').innerText = `🟢 ${count} User${count !== 1 ? 's' : ''} Online`;
@@ -350,11 +369,11 @@
             };
 
             tempPeer.on('open', () => {
-                doCheck();
-                window.loginPingInterval = setInterval(doCheck, 3000);
+                window.doCheck();
+                window.loginPingInterval = setInterval(window.doCheck, 3000);
             });
             tempPeer.on('error', () => {
-                $('online-users').innerText = "🟢 0 Users Online";
+                if (ROOM_ID) $('online-users').innerText = "🟢 0 Users Online";
             });
             
             $('messages').addEventListener('click', (e) => {
@@ -368,17 +387,35 @@
             });
         });
 
+        let typingTimerPass;
+        $('room-pass').addEventListener('input', () => {
+            clearTimeout(typingTimerPass);
+            const pass = $('room-pass').value.trim();
+            if (!pass) {
+                $('online-users').innerText = "Enter password to check room...";
+                ROOM_ID = "";
+                hashedPass = "";
+                return;
+            }
+            $('online-users').innerText = "Checking room status...";
+            typingTimerPass = setTimeout(async () => {
+                hashedPass = await hashString(pass);
+                ROOM_ID = "superconf-mesh-" + hashedPass.substring(0, 32);
+                if (window.doCheck) window.doCheck();
+            }, 500);
+        });
+
         const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
         $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
         const escapeHTML = s => s.replace(/[&<>'"]/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[t]));
         const linkify = s => s.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank">${url}</a>`);
 
         $('join-btn').onclick = async () => {
+            if (!ROOM_ID || !hashedPass) return alert("Please enter a room password.");
             if (window.loginPingInterval) clearInterval(window.loginPingInterval);
             if (tempPeer && !tempPeer.destroyed) { tempPeer.destroy(); }
             
             myName = $('username').value.trim() || "Anon";
-            if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
             
             if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
                 Notification.requestPermission();
@@ -451,21 +488,66 @@
         }
 
         function handleNewConnection(conn) {
-            if (conn.metadata?.isPing) {
-                conn.on('data', data => {
-                    if (data.type === 'get-count') conn.send({ type: 'count-resp', count: Object.keys(connections).length + 1 });
-                });
-                return;
-            }
+            let isAuthenticated = false;
+            let myNonce = crypto.randomUUID();
 
-            // FILE DATA CHANNEL ISOLATION
-            if (conn.label === 'file') {
-                const setupFile = () => { fileConns[conn.peer] = conn; };
-                conn.open ? setupFile() : conn.on('open', setupFile);
-                
-                conn.on('data', data => {
-                    const sid = conn.peer; lastSeen[sid] = Date.now();
+            const finalizeSetup = () => {
+                isAuthenticated = true;
+
+                if (conn.metadata?.isPing) {
+                    return; // Proceed waiting for data payload
+                }
+
+                if (conn.label === 'file') {
+                    fileConns[conn.peer] = conn;
+                } else {
+                    pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
+                    $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
+                    if (!isHost && conn.peer === ROOM_ID) { $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559"; }
+                    conn.send({ type: 'name', value: myName });
+                    if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
                     
+                    if (screenStream) {
+                        screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
+                        applyBitrateLimit(screenCalls[conn.peer], 1000000);
+                    }
+                    if (camStream) {
+                        camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
+                        applyBitrateLimit(camCalls[conn.peer], 500000);
+                    }
+                }
+            };
+
+            const onOpen = () => {
+                conn.send({ type: 'auth-challenge', nonce: myNonce });
+            };
+            conn.open ? onOpen() : conn.on('open', onOpen);
+
+            conn.on('data', async data => {
+                const sid = conn.peer; lastSeen[sid] = Date.now();
+
+                // 1. Mandatory Pre-Authentication
+                if (!isAuthenticated) {
+                    if (data.type === 'auth-challenge') {
+                        conn.send({ type: 'auth-response', hash: await hashString(data.nonce + hashedPass) });
+                    } else if (data.type === 'auth-response') {
+                        const expected = await hashString(myNonce + hashedPass);
+                        if (data.hash === expected) {
+                            finalizeSetup();
+                        } else {
+                            conn.close(); // Invalid Authentication
+                        }
+                    }
+                    return;
+                }
+
+                // 2. Verified Data Handling
+                if (conn.metadata?.isPing) {
+                    if (data.type === 'get-count') conn.send({ type: 'count-resp', count: Object.keys(connections).length + 1 });
+                    return;
+                }
+
+                if (conn.label === 'file') {
                     if (data.type === 'file-control') {
                         const tr = fileTransfers[data.txId];
                         if (!tr && data.action !== 'cancel') return;
@@ -504,7 +586,6 @@
                     else if (data.type === 'file-chunk') {
                         const tr = fileTransfers[data.txId]; if(!tr) return;
                         
-                        // Properly index array instead of unreliably pushing
                         tr.chunks[data.index] = data.data; 
                         tr.received += data.data.byteLength;
                         
@@ -533,69 +614,52 @@
                             delete fileTransfers[data.txId];
                         }
                     }
-                });
-                conn.on('close', () => delete fileConns[conn.peer]); 
-                conn.on('error', () => delete fileConns[conn.peer]);
-                return;
-            }
-
-            // --- MAIN CHAT CONNECTION (Unreliable) ---
-            const setup = () => {
-                pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
-                $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
-                if (!isHost && conn.peer === ROOM_ID) { $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559"; }
-                conn.send({ type: 'name', value: myName });
-                if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
-                
-                if (screenStream) {
-                    screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
-                    applyBitrateLimit(screenCalls[conn.peer], 1000000);
-                }
-                if (camStream) {
-                    camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
-                    applyBitrateLimit(camCalls[conn.peer], 500000);
-                }
-            };
-            
-            conn.open ? setup() : conn.on('open', setup);
-            conn.on('data', data => {
-                const sid = conn.peer; lastSeen[sid] = Date.now();
-                if (data.type === 'name') {
-                    const safeName = escapeHTML(data.value);
-                    peerNames[sid] = safeName;
-                    addUserToSidebar(safeName, sid);
-                    addSystemMsg(`<b>${safeName}</b> joined.`);
-                    playJoinSound();
-                }
-                else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
-                else if (data.type === 'text') {
-                    const senderName = peerNames[sid] || "Unknown";
-                    addMessage(linkify(escapeHTML(data.value)), senderName, 'theirs');
-                    playJoinSound();
-                    notifyUser(`New message from ${senderName}`, data.value);
-                }
-                else if (data.type === 'typing') { 
-                    const uname = peerNames[sid] || "Someone"; 
-                    data.state ? typingUsers.add(uname) : typingUsers.delete(uname); 
-                    updateTypingUI(); 
-                }
-                else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
-                else if (data.type === 'pong') {
-                    const lat = Date.now() - data.time;
-                    lastRealPing[sid] = lat;
-                    updatePingUI(sid, lat);
-                }
-                else if (data.type === 'play-sound') { 
-                    playCustomSound(data.buffer, data.mime, sid); 
-                    addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
-                    const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
+                } else {
+                    if (data.type === 'name') {
+                        const safeName = escapeHTML(data.value);
+                        peerNames[sid] = safeName;
+                        addUserToSidebar(safeName, sid);
+                        addSystemMsg(`<b>${safeName}</b> joined.`);
+                        playJoinSound();
+                    }
+                    else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { if(pid !== myId && !connections[pid]) connectToPeer(pid); });
+                    else if (data.type === 'text') {
+                        const senderName = peerNames[sid] || "Unknown";
+                        addMessage(linkify(escapeHTML(data.value)), senderName, 'theirs');
+                        playJoinSound();
+                        notifyUser(`New message from ${senderName}`, data.value);
+                    }
+                    else if (data.type === 'typing') { 
+                        const uname = peerNames[sid] || "Someone"; 
+                        data.state ? typingUsers.add(uname) : typingUsers.delete(uname); 
+                        updateTypingUI(); 
+                    }
+                    else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
+                    else if (data.type === 'pong') {
+                        const lat = Date.now() - data.time;
+                        lastRealPing[sid] = lat;
+                        updatePingUI(sid, lat);
+                    }
+                    else if (data.type === 'play-sound') { 
+                        playCustomSound(data.buffer, data.mime, sid); 
+                        addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
+                        const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
+                        addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
+                    }
                 }
             });
-            conn.on('close', () => removePeer(conn.peer)); conn.on('error', () => removePeer(conn.peer));
+
+            conn.on('close', () => { if (conn.label === 'file') { delete fileConns[conn.peer]; } else { removePeer(conn.peer); } }); 
+            conn.on('error', () => { if (conn.label === 'file') { delete fileConns[conn.peer]; } else { removePeer(conn.peer); } });
         }
 
         function handleNewCall(call) {
+            // Require Challenge-Response clearance on datachannels before accepting media pipelines
+            if (!connections[call.peer]) {
+                call.close();
+                return;
+            }
+
             const type = call.metadata?.type;
             if (type === 'screenshare' || type === 'webcam') {
                 call.answer(undefined, { sdpTransform: mungeSDP });
