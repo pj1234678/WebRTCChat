@@ -8,9 +8,9 @@ function mungeSDP(sdp) {
         const pt = match[1];
         const fmtpRegex = new RegExp(`(a=fmtp:${pt} .*)`);
         if (fmtpRegex.test(sdp)) {
-            return sdp.replace(fmtpRegex, `$1;useinbandfec=1;usedtx=1`);
+            return sdp.replace(fmtpRegex, `$1;useinbandfec=1`);
         } else {
-            return sdp.replace(new RegExp(`(a=rtpmap:${pt} opus\\/48000\\/2\\r\\n)`, 'i'), `$1a=fmtp:${pt} useinbandfec=1;usedtx=1\r\n`);
+            return sdp.replace(new RegExp(`(a=rtpmap:${pt} opus\\/48000\\/2\\r\\n)`, 'i'), `$1a=fmtp:${pt} useinbandfec=1\r\n`);
         }
     }
     return sdp;
@@ -51,7 +51,6 @@ const MAX_RETRIES = 15;
 const ACK_FLUSH_INTERVAL = 200;
 const GAP_CHECK_INTERVAL = 2000;
 const STALL_TIMEOUT = 15000;
-const MAX_FILE_SIZE = 524288000;
 
 async function computeHash(buffer) {
     const h = await crypto.subtle.digest('SHA-256', buffer);
@@ -580,8 +579,29 @@ function handleNewCall(call) {
     const type = call.metadata?.type;
     if (type === 'screenshare' || type === 'webcam') {
         call.answer(undefined, { sdpTransform: mungeSDP });
-        call.on('stream', st => addVideoElement(call.peer + (type==='webcam'?'-cam':''), st, false));
-        call.on('close', () => $(`video-${call.peer}${type==='webcam'?'-cam':''}`)?.remove());
+        call.on('stream', st => {
+            const suffix = type === 'webcam' ? '-cam' : '';
+            addVideoElement(call.peer + suffix, st, false);
+            if (type === 'screenshare') {
+                const audioTracks = st.getAudioTracks();
+                if (audioTracks.length > 0) {
+                    const ssAudioId = `audio-${call.peer}-ss`;
+                    if (!$(ssAudioId)) {
+                        const audioStream = new MediaStream(audioTracks);
+                        const a = new Audio();
+                        a.id = ssAudioId; a.srcObject = audioStream; a.autoplay = true;
+                        document.body.appendChild(a);
+                        const vs = $(`vol-${call.peer}`); if(vs) a.volume = vs.value;
+                        const muteIcon = $(`mute-icon-${call.peer}`);
+                        if(muteIcon && muteIcon.innerText === "🔇") a.muted = true;
+                    }
+                }
+            }
+        });
+        call.on('close', () => {
+            $(`video-${call.peer}${type==='webcam'?'-cam':''}`)?.remove();
+            $(`audio-${call.peer}-ss`)?.remove();
+        });
         return;
     }
     localStream ? call.answer(localStream, { sdpTransform: mungeSDP }) : call.answer(undefined, { sdpTransform: mungeSDP });
@@ -679,6 +699,9 @@ $('screen-btn').onclick = async () => {
         });
         const screenTrack = screenStream.getVideoTracks()[0];
         if (screenTrack) screenTrack.contentHint = 'detail';
+        if (screenStream.getAudioTracks().length === 0) {
+            addSystemMsg("⚠️ Screen sharing without audio — browser/system may not support capturing audio from this source");
+        }
         
         $('screen-btn').classList.add('active'); addVideoElement('me', screenStream, true);
         screenStream.getVideoTracks()[0].onended = $('screen-btn').onclick;
@@ -700,7 +723,6 @@ function addVideoElement(id, stream, isLocal) {
     v.title = "Click to fullscreen";
     if (isLocal) v.muted = true;
     v.onclick = () => v.requestFullscreen?.();
-    v.onpause = () => v.play();
     $('video-grid').appendChild(v);
 }
 
@@ -802,9 +824,6 @@ async function sendFile(file) {
     if (!file) return;
     if (Object.keys(connections).length === 0) {
         return addSystemMsg("❌ No one is in the room to receive files!");
-    }
-    if (file.size > MAX_FILE_SIZE) {
-        return addSystemMsg(`❌ File too large (max ${Math.round(MAX_FILE_SIZE/1024/1024)}MB)`);
     }
     const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
     const txId = 'tx-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
@@ -1166,47 +1185,48 @@ function addUserToSidebar(name, id) {
         let isUserMuted = false;
         let previousVolume = 1;
 
+        const setPeerAudio = (muted, vol) => {
+            const a = $(`audio-${id}`);
+            const ss = $(`audio-${id}-ss`);
+            if (a) { a.muted = muted; if (!muted) a.volume = vol; else a.volume = 0; }
+            if (ss) { ss.muted = muted; if (!muted) ss.volume = vol; else ss.volume = 0; }
+            if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = muted; snd.volume = muted ? 0 : vol; });
+        };
+
         muteIcon.onclick = () => {
             isUserMuted = !isUserMuted;
             muteIcon.innerText = isUserMuted ? "🔇" : "🔊";
             muteIcon.style.opacity = isUserMuted ? "0.5" : "0.8";
             
-            const a = $(`audio-${id}`);
-
             if (isUserMuted) {
                 previousVolume = parseFloat(volSlider.value) > 0 ? parseFloat(volSlider.value) : 1;
                 volSlider.value = 0;
-                if (a) { a.muted = true; a.volume = 0; }
-                if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = true; snd.volume = 0; });
+                setPeerAudio(true, 0);
             } else {
                 volSlider.value = previousVolume;
-                if (a) { a.muted = false; a.volume = previousVolume; }
-                if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = false; snd.volume = previousVolume; });
+                setPeerAudio(false, previousVolume);
             }
         };
 
         volSlider.addEventListener('input', e => { 
             const vol = parseFloat(e.target.value);
-            const a = $(`audio-${id}`); 
-            if(a) a.volume = vol; 
-            
-            if (activeSounds[id]) {
-                activeSounds[id].forEach(snd => snd.volume = vol);
-            }
+            const a = $(`audio-${id}`);
+            const ss = $(`audio-${id}-ss`);
+            if(a) a.volume = vol;
+            if(ss) ss.volume = vol;
+            if (activeSounds[id]) activeSounds[id].forEach(snd => snd.volume = vol);
 
             if (vol === 0 && !isUserMuted) {
                 isUserMuted = true;
                 muteIcon.innerText = "🔇";
                 muteIcon.style.opacity = "0.5";
-                if (a) a.muted = true;
-                if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = true);
+                setPeerAudio(true, 0);
             } 
             else if (isUserMuted && vol > 0) {
                 isUserMuted = false;
                 muteIcon.innerText = "🔊";
                 muteIcon.style.opacity = "0.8";
-                if (a) a.muted = false;
-                if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = false);
+                setPeerAudio(false, vol);
             }
         });
     }
