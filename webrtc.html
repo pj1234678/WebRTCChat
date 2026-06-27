@@ -8,7 +8,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        body { font-family: 'Inter', sans-serif; background: #111214; color: #f2f3f5; display: flex; height: 100vh; margin: 0; overflow: hidden; }
+        /* Using 100dvh fixes the mobile browser address bar covering the bottom */
+        body { font-family: 'Inter', sans-serif; background: #111214; color: #f2f3f5; display: flex; height: 100vh; height: 100dvh; margin: 0; overflow: hidden; }
         
         /* Removed native 'resize', adjusted sidebar layout slightly */
         .sidebar { width: 320px; min-width: 240px; max-width: 50vw; box-sizing: border-box; background: #1e1f22; border-right: 1px solid #2b2d31; display: flex; flex-direction: column; padding: 20px; position: relative; flex-shrink: 0; }
@@ -19,7 +20,8 @@
 
         .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; background: #111214; position: relative; min-width: 0; }
         
-        #login-screen { position: absolute; inset: 0; background: rgba(17,18,20,0.95); backdrop-filter: blur(10px); z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        /* Z-index increased to 2000 so it sits firmly above the mobile hamburger button */
+        #login-screen { position: absolute; inset: 0; background: rgba(17,18,20,0.95); backdrop-filter: blur(10px); z-index: 2000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
         #login-screen h1 { font-weight: 600; margin-bottom: 5px; }
         #login-screen input { font-family: 'Inter', sans-serif; padding: 14px; border-radius: 10px; border: 1px solid #383a40; background: #1e1f22; color: white; outline: none; margin-bottom: 12px; width: 220px; text-align: center; font-size: 15px; transition: 0.2s; }
         #login-screen input:focus { border-color: #1a73e8; }
@@ -132,6 +134,7 @@
                 width: 280px !important; 
                 max-width: 80vw; 
                 height: 100vh;
+                height: 100dvh;
                 z-index: 100; 
                 transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
                 box-shadow: 5px 0 25px rgba(0,0,0,0.7);
