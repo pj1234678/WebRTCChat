@@ -112,40 +112,65 @@
         @keyframes fxFall { 0% { opacity: 1; transform: translateY(0) rotate(0deg); } 100% { opacity: 0; transform: translateY(40px) rotate(180deg); } }
         @keyframes fxFloat { 0% { opacity: 0.7; transform: translateY(0) scale(1); } 100% { opacity: 0; transform: translateY(-40px) scale(1.5); } }
 
+        /* Mobile Overlay & Hamburger (Hidden on Desktop) */
+        #mobile-overlay { display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.6); z-index: 80; backdrop-filter: blur(2px); }
+        #mobile-overlay.active { display: block; }
+        
+        #hamburger-btn { display: none; position: absolute; top: 12px; left: 15px; background: #1e1f22; border: 1px solid #383a40; color: #dbdee1; padding: 8px 12px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; z-index: 50; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+        #hamburger-btn:active { transform: scale(0.95); }
+
         /* Mobile Responsiveness */
         @media (max-width: 768px) {
-            /* Stack the layout vertically */
-            body { flex-direction: column; }
+            body { flex-direction: row; }
             
-            /* Move sidebar to the top, limit its height, and allow scrolling */
+            #hamburger-btn { display: block; }
+            
+            /* Slide sidebar off-screen by default */
             .sidebar { 
-                width: 100% !important; 
-                max-width: 100%; 
-                height: 35vh; 
-                min-height: 220px; 
-                border-right: none; 
-                border-bottom: 1px solid #2b2d31; 
-                overflow-y: auto; 
+                position: absolute; 
+                top: 0; bottom: 0; left: -100%; 
+                width: 280px !important; 
+                max-width: 80vw; 
+                height: 100vh;
+                z-index: 100; 
+                transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+                box-shadow: 5px 0 25px rgba(0,0,0,0.7);
             }
-            
-            /* Disable the drag-to-resize bar on mobile */
+            .sidebar.open { left: 0; }
             .sidebar-resizer { display: none; }
             
-            /* Shrink videos slightly so more can fit on screen */
-            .screen-video { width: 140px; height: 140px; }
-            
-            /* Wrap the input bar so buttons don't get squished */
-            .input-bar { flex-wrap: wrap; padding: 12px; }
-            
-            /* Move the text box to its own line above the buttons */
-            #msg-input { 
-                min-width: 100%; 
-                order: -1; /* Pushes the input to the top of the flex container */
-                margin-bottom: 8px; 
+            /* Push messages down so they aren't hidden by the hamburger button */
+            #messages { padding-top: 60px; }
+
+            /* Fix input bar width and force Send button to stay next to input */
+            .input-bar { 
+                box-sizing: border-box; 
+                width: 100%; 
+                flex-wrap: wrap; 
+                padding: 12px; 
+                gap: 10px; 
             }
-            
-            /* Make the send button fill the remaining space next to media buttons */
-            #send-btn { flex: 1; }
+            #msg-input { 
+                box-sizing: border-box;
+                order: 1; 
+                /* Calculates exactly 100% minus the gap (10px) and send button (80px) */
+                flex: 0 0 calc(100% - 90px); 
+                min-width: 0; 
+                height: 44px;
+            }
+            #send-btn { 
+                box-sizing: border-box;
+                order: 2; 
+                flex: 0 0 80px; 
+                height: 44px; 
+                padding: 0; 
+            }
+            /* Push media tools to the row underneath the text box */
+            .media-btn { 
+                order: 3; 
+                width: 44px; 
+                height: 44px; 
+            }
         }
     </style>
 </head>
@@ -180,6 +205,9 @@
     </div>
 
     <div class="main-area">
+        <div id="mobile-overlay" onclick="toggleSidebar()"></div> 
+        <button id="hamburger-btn" onclick="toggleSidebar()">☰ Users</button> 
+
         <div id="drop-overlay">
             <div style="font-size: 48px; margin-bottom: 12px;">📥</div>
             Drop to Share or Play
@@ -208,6 +236,12 @@
 
     <script>
         const $ = id => document.getElementById(id);
+
+        // --- Mobile Sidebar Toggle ---
+        window.toggleSidebar = () => {
+            document.querySelector('.sidebar').classList.toggle('open');
+            document.getElementById('mobile-overlay').classList.toggle('active');
+        };
 
         // --- Custom Edge Resizer Logic ---
         const sidebar = document.querySelector('.sidebar');
