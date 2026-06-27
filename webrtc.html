@@ -240,6 +240,25 @@
     <script>
         const $ = id => document.getElementById(id);
 
+        // --- Screen Wake Lock API ---
+        let wakeLock = null;
+        const requestWakeLock = async () => {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('Screen Wake Lock acquired');
+                }
+            } catch (err) {
+                console.warn('Wake Lock error:', err);
+            }
+        };
+
+        document.addEventListener('visibilitychange', () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') {
+                requestWakeLock();
+            }
+        });
+
         // --- Mobile Sidebar Toggle ---
         window.toggleSidebar = () => {
             document.querySelector('.sidebar').classList.toggle('open');
@@ -490,7 +509,10 @@
             } 
             catch(err) {}
             
-            $('login-screen').style.display = 'none'; $('conn-status').innerText = "Initializing...";
+            $('login-screen').style.display = 'none'; 
+            $('conn-status').innerText = "Initializing...";
+
+            requestWakeLock(); // Request screen to stay awake once logged in
             
             $('room-clock').style.display = 'inline-block';
             const tickClock = () => { 
