@@ -339,7 +339,7 @@
             });
         };
 
-        let myName = "", myId = "", isHost = false, peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
+        let myName = "", myId = "", peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         
         const connections = {}, fileConns = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
@@ -538,16 +538,16 @@
             peer = new Peer(ROOM_ID, peerConfig);
             peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
             peer.on('open', id => {
-                myId = id; isHost = true; $('conn-status').innerText = "Host Ready"; $('conn-status').style.color = "#23a559";
+                myId = id; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
                 const safeMyName = escapeHTML(myName);
-                addSystemMsg(`You created the room as <b>${safeMyName}</b>`); addUserToSidebar(safeMyName, "me"); enableChat();
+                addSystemMsg(`You joined as <b>${safeMyName}</b>`); addUserToSidebar(safeMyName, "me"); enableChat();
             });
             peer.on('error', err => {
                 if (err.type === 'unavailable-id') {
                     peer = new Peer(peerConfig);
                     peer.on('connection', handleNewConnection); peer.on('call', handleNewCall);
                     peer.on('open', id => {
-                        myId = id; isHost = false; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
+                        myId = id; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
                         const safeMyName = escapeHTML(myName);
                         addSystemMsg(`You joined as <b>${safeMyName}</b>`); addUserToSidebar(safeMyName, "me"); connectToPeer(ROOM_ID); enableChat();
                     });
@@ -680,9 +680,11 @@
             const setup = () => {
                 pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
                 $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
-                if (!isHost && conn.peer === ROOM_ID) { $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559"; }
+                $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
                 conn.send({ type: 'name', value: myName });
-                if (isHost) { const peers = Object.keys(connections).filter(id => id !== conn.peer); if(peers.length) conn.send({ type: 'peer-list', peers }); }
+                
+                const peers = Object.keys(connections).filter(id => id !== conn.peer); 
+                if(peers.length) conn.send({ type: 'peer-list', peers });
                 
                 if (screenStream) {
                     screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
@@ -791,8 +793,11 @@
             
             delete connections[id]; delete fileConns[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
             
-            if (id === ROOM_ID && !isHost) { $('searching-container').style.display = 'flex'; $('conn-status').innerText = "Searching..."; $('conn-status').style.color = "#f0b232"; }
-            if (!Object.keys(connections).length) $('searching-container').style.display = 'flex';
+            if (!Object.keys(connections).length) { 
+                $('searching-container').style.display = 'flex'; 
+                $('conn-status').innerText = "Searching..."; 
+                $('conn-status').style.color = "#f0b232"; 
+            }
         }
 
         $('cam-btn').onclick = async () => {
@@ -1118,8 +1123,9 @@
 
 
         setInterval(() => {
-            if (isHost) { const peers = Object.keys(connections); if(peers.length) bcast({ type: 'mesh-sync', peers }); }
-            else if (!connections[ROOM_ID]) connectToPeer(ROOM_ID);
+            const peers = Object.keys(connections); 
+            if(peers.length) bcast({ type: 'mesh-sync', peers }); 
+            if (myId !== ROOM_ID && !connections[ROOM_ID]) connectToPeer(ROOM_ID);
         }, 3000);
 
         async function checkConnectionTypes() {
