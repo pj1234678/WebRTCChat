@@ -406,6 +406,13 @@
 
         window.cancelRx = async (txId, sid) => {
             const tr = fileTransfers[txId];
+            const conn = fileConns[sid];
+            
+            // Notify the sender that this specific peer is canceling
+            if (conn && conn.open) {
+                conn.send({ type: 'file-control-rx', txId, action: 'cancel' });
+            }
+
             if (tr) {
                 try {
                     if (tr.writable) await tr.writable.close();
@@ -637,8 +644,8 @@
                     else if (data.type === 'file-control-rx') {
                         const tx = activeTransfers.tx[data.txId];
                         if (tx) {
-                            if (data.action === 'pause' && !tx.paused) window.toggleTx(data.txId);
-                            else if (data.action === 'resume' && tx.paused) window.toggleTx(data.txId);
+                            if (!tx.peerStates) tx.peerStates = {};
+                            tx.peerStates[sid] = (data.action === 'resume') ? 'active' : data.action;
                         }
                     }
 					else if (data.type === 'file-nack') {
@@ -1056,7 +1063,18 @@
             const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
             const txId = 'tx-' + Date.now() + '-' + Math.floor(Math.random()*1000);
             
-            activeTransfers.tx[txId] = { paused: false, canceled: false, file: file };
+            // Initialize individual peer states
+            const initialPeerStates = {};
+            for (let sid of Object.keys(fileConns)) {
+                if (fileConns[sid].open) initialPeerStates[sid] = 'active';
+            }
+
+            activeTransfers.tx[txId] = { 
+                paused: false, 
+                canceled: false, 
+                file: file,
+                peerStates: initialPeerStates 
+            };
 
             bcast({ type: 'file-meta', txId: txId, name: filename, fileType: file.type, size: file.size });
             
@@ -1073,42 +1091,50 @@
             let chunkCount = 0;
             const CHUNK_SIZE = 65536; 
             const startTime = Date.now();
-            
-            // INCREASED: Allow up to 4MB in the buffer before throttling (up from 256KB)
             const MAX_BUFFER = 4 * 1024 * 1024; 
 
-            // PIPELINE: Start reading the very first chunk before entering the loop
             let nextChunkPromise = readChunkViaWorker(file, offset, CHUNK_SIZE, txId, chunkCount);
             
+            // Helper to dynamically check how many peers are currently receiving
+            const getActivePeersCount = () => Object.keys(fileConns).filter(sid => 
+                fileConns[sid].open && activeTransfers.tx[txId].peerStates[sid] === 'active'
+            ).length;
+
             while (offset < file.size) {
                 if (activeTransfers.tx[txId].canceled) return;
 
-                // SMART AUTO-FREEZE
-                while ((activeTransfers.tx[txId].paused && !activeTransfers.tx[txId].canceled) || Object.keys(fileConns).length === 0) {
+                // SMART AUTO-FREEZE: Pauses if globally paused OR if nobody is actively receiving right now
+                while ((activeTransfers.tx[txId].paused && !activeTransfers.tx[txId].canceled) || getActivePeersCount() === 0) {
                     await new Promise(r => setTimeout(r, 100));
                     if (activeTransfers.tx[txId].canceled) return;
                 }
 
-                // Wait for the currently pipelined chunk
                 const { buffer, hash } = await nextChunkPromise;
                 
-                // PIPELINE: Immediately ask the worker to prepare the NEXT chunk in the background
                 const nextOffset = offset + CHUNK_SIZE;
                 if (nextOffset < file.size) {
                     nextChunkPromise = readChunkViaWorker(file, nextOffset, CHUNK_SIZE, txId, chunkCount + 1);
                 }
                 
-// Wait if the WebRTC buffer is getting too full
-for (let c of Object.values(fileConns)) {
-    if (c.open && c.dataChannel) {
-        // Break out of the wait loop if the connection closes mid-transfer
-        while (c.open && c.dataChannel.readyState === 'open' && c.dataChannel.bufferedAmount > MAX_BUFFER) { 
-            await new Promise(r => setTimeout(r, 5)); 
-        }
-    }
-}
+                // Wait if the WebRTC buffer is getting too full (ONLY for active peers)
+                for (let sid of Object.keys(fileConns)) {
+                    const c = fileConns[sid];
+                    if (activeTransfers.tx[txId].peerStates[sid] !== 'active') continue;
+
+                    if (c.open && c.dataChannel) {
+                        while (c.open && c.dataChannel.readyState === 'open' && c.dataChannel.bufferedAmount > MAX_BUFFER) { 
+                            await new Promise(r => setTimeout(r, 5)); 
+                        }
+                    }
+                }
                 
-                bcast({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer, hash: hash }); 
+                // Send chunks individually to respect paused/canceled states
+                for (let sid of Object.keys(fileConns)) {
+                    const c = fileConns[sid];
+                    if (c.open && activeTransfers.tx[txId].peerStates[sid] === 'active') {
+                        c.send({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer, hash: hash });
+                    }
+                }
                 
                 offset += CHUNK_SIZE;
                 chunkCount++;
@@ -1117,14 +1143,14 @@ for (let c of Object.values(fileConns)) {
                 const bar = $(`bar-${txId}`);
                 if (bar) bar.style.width = `${percentValue}%`;
 
-                // Throttled UI updating: Only update DOM every ~50 chunks to save CPU during fast transfers
                 if (chunkCount % 50 === 0 || offset >= file.size) {
                     const elapsed = (Date.now() - startTime) / 1000;
                     const speed = elapsed > 0 ? offset / elapsed : 0;
-                    const activePeers = Object.values(fileConns).filter(c => c.open).length;
+                    const activePeers = getActivePeersCount();
+                    
                     const statsEl = $(`stats-${txId}`);
                     if (statsEl) {
-                        statsEl.innerText = `(${percentValue.toFixed(1)}%, ${formatBytes(speed)}/s, ${activePeers} peer${activePeers!==1?'s':''})`;
+                        statsEl.innerText = `(${percentValue.toFixed(1)}%, ${formatBytes(speed)}/s, ${activePeers} peer${activePeers !== 1 ? 's' : ''})`;
                     }
                 }
             }
