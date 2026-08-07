@@ -1098,14 +1098,15 @@
                     nextChunkPromise = readChunkViaWorker(file, nextOffset, CHUNK_SIZE, txId, chunkCount + 1);
                 }
                 
-                // Wait if the WebRTC buffer is getting too full
-                for (let c of Object.values(fileConns)) {
-                    if (c.open && c.dataChannel) {
-                        while (c.dataChannel.bufferedAmount > MAX_BUFFER) { 
-                            await new Promise(r => setTimeout(r, 5)); // Reduced wait time from 10ms to 5ms
-                        }
-                    }
-                }
+// Wait if the WebRTC buffer is getting too full
+for (let c of Object.values(fileConns)) {
+    if (c.open && c.dataChannel) {
+        // Break out of the wait loop if the connection closes mid-transfer
+        while (c.open && c.dataChannel.readyState === 'open' && c.dataChannel.bufferedAmount > MAX_BUFFER) { 
+            await new Promise(r => setTimeout(r, 5)); 
+        }
+    }
+}
                 
                 bcast({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer, hash: hash }); 
                 
