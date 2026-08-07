@@ -879,15 +879,22 @@
             
             if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
 
-            // SMARTER WAY: Do not delete the transfer. Just flag it visually. 
-            // It will resume automatically if they reconnect.
+            // Clean up RECEIVING states: Flag visually that the sender dropped
             for (let tid in fileTransfers) {
                 if (fileTransfers[tid].senderId === id) {
                     const msgNode = $(`msg-rx-${tid}`);
                     if (msgNode) {
                         const info = msgNode.querySelector('.msg-info');
-                        if (info) info.innerHTML = `${uname} <span style="color: #f0b232;">(Reconnecting...)</span>`;
+                        if (info) info.innerHTML = `${uname} <span style="color: #da373c;">(Disconnected)</span>`;
                     }
+                }
+            }
+
+            // Clean up SENDING states: Explicitly mark the peer as disconnected from all active uploads
+            for (let txId in activeTransfers.tx) {
+                const tx = activeTransfers.tx[txId];
+                if (tx.peerStates && tx.peerStates[id]) {
+                    tx.peerStates[id] = 'disconnected';
                 }
             }
 
@@ -1353,14 +1360,7 @@
         $('logout-btn').onclick = () => { 
             allowExit = true; // Bypass the beforeunload warning
             if(peer) peer.destroy(); 
-            
-            // Attempt to close the tab
             window.close(); 
-            
-            // Fallback just in case the browser blocks window.close()
-            setTimeout(() => {
-                document.body.innerHTML = '<div style="display:flex;height:100vh;background:#111214;align-items:center;justify-content:center;color:#949ba4;font-size:18px;font-weight:500;">You have left the room. You can safely close this tab.</div>';
-            }, 100);
         };
 
         function addMessage(html, user, type, msgId = null) { 
