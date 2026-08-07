@@ -1055,7 +1055,7 @@
             }
         });
 
-        async function sendFile(file) {
+async function sendFile(file) {
             if (!file) return;
             if (Object.keys(connections).length === 0) {
                 return addSystemMsg("❌ No one is in the room to receive files!");
@@ -1122,13 +1122,31 @@
                     if (activeTransfers.tx[txId].peerStates[sid] !== 'active') continue;
 
                     if (c.open && c.dataChannel) {
+                        let lastBuffered = c.dataChannel.bufferedAmount;
+                        let stagnantTime = 0;
+                        
                         while (c.open && c.dataChannel.readyState === 'open' && c.dataChannel.bufferedAmount > MAX_BUFFER) { 
-                            await new Promise(r => setTimeout(r, 5)); 
+                            await new Promise(r => setTimeout(r, 50)); 
+                            
+                            // STAGNANT BUFFER DETECTION: Drop peers who silently disconnect
+                            if (c.dataChannel.bufferedAmount >= lastBuffered) {
+                                stagnantTime += 50;
+                            } else {
+                                stagnantTime = 0; // Buffer drained slightly, reset the timer
+                            }
+                            lastBuffered = c.dataChannel.bufferedAmount;
+
+                            // If no data has drained for 5 seconds, suspend them
+                            if (stagnantTime > 5000) {
+                                console.warn(`Peer ${peerNames[sid] || sid} has a frozen buffer. Suspending their transfer.`);
+                                activeTransfers.tx[txId].peerStates[sid] = 'stalled';
+                                break;
+                            }
                         }
                     }
                 }
                 
-                // Send chunks individually to respect paused/canceled states
+                // Send chunks individually to respect paused/canceled/stalled states
                 for (let sid of Object.keys(fileConns)) {
                     const c = fileConns[sid];
                     if (c.open && activeTransfers.tx[txId].peerStates[sid] === 'active') {
