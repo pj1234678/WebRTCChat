@@ -241,9 +241,10 @@
         const $ = id => document.getElementById(id);
 
         // --- Prevent Accidental Close ---
+        let allowExit = false;
         window.addEventListener('beforeunload', (e) => {
-            // Only warn if they are inside the room (login screen is hidden)
-            if ($('login-screen').style.display === 'none') {
+            // Only warn if they are inside the room AND didn't click the Leave button
+            if (!allowExit && $('login-screen').style.display === 'none') {
                 e.preventDefault();
                 e.returnValue = '';
             }
@@ -1055,7 +1056,7 @@
             }
         });
 
-async function sendFile(file) {
+        async function sendFile(file) {
             if (!file) return;
             if (Object.keys(connections).length === 0) {
                 return addSystemMsg("❌ No one is in the room to receive files!");
@@ -1350,9 +1351,16 @@ async function sendFile(file) {
         
         // Ensure manual logout button overrides the safety check
         $('logout-btn').onclick = () => { 
-            window.onbeforeunload = null; 
+            allowExit = true; // Bypass the beforeunload warning
             if(peer) peer.destroy(); 
-            location.reload(); 
+            
+            // Attempt to close the tab
+            window.close(); 
+            
+            // Fallback just in case the browser blocks window.close()
+            setTimeout(() => {
+                document.body.innerHTML = '<div style="display:flex;height:100vh;background:#111214;align-items:center;justify-content:center;color:#949ba4;font-size:18px;font-weight:500;">You have left the room. You can safely close this tab.</div>';
+            }, 100);
         };
 
         function addMessage(html, user, type, msgId = null) { 
