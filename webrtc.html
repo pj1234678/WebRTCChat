@@ -404,7 +404,15 @@
             }
         };
 
-        window.cancelRx = (txId, sid) => {
+        window.cancelRx = async (txId, sid) => {
+            const tr = fileTransfers[txId];
+            if (tr) {
+                try {
+                    if (tr.writable) await tr.writable.close();
+                    const opfsRoot = await navigator.storage.getDirectory();
+                    await opfsRoot.removeEntry(txId);
+                } catch(e) {}
+            }
             delete fileTransfers[txId];
             const msgNode = $(`msg-rx-${txId}`);
             if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Download Canceled</div>`;
@@ -612,6 +620,15 @@
                             const btn = $(`pause-rx-${data.txId}`);
                             if (btn) { btn.innerHTML = "⏸️ Pause"; tr.paused = false; }
                         } else if (data.action === 'cancel') {
+                            if (tr) {
+                                (async () => {
+                                    try {
+                                        if (tr.writable) await tr.writable.close();
+                                        const opfsRoot = await navigator.storage.getDirectory();
+                                        await opfsRoot.removeEntry(data.txId);
+                                    } catch(e) {}
+                                })();
+                            }
                             delete fileTransfers[data.txId];
                             const msgNode = $(`msg-rx-${data.txId}`);
                             if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
@@ -637,20 +654,42 @@
 					}
                     else if (data.type === 'file-meta') { 
                         const txId = data.txId;
-                        fileTransfers[txId] = { meta: data, chunks: [], received: 0, senderId: sid, paused: false, startTime: Date.now() }; 
-                        const progHtml = `
-                        <div>📥 Downloading <b>${data.name}</b> <span id="stats-rx-${txId}" style="font-size:12px; color:#949ba4;">(0%, 0 KB/s)</span></div>
-                        <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
-                        <div style="margin-top: 8px; display: flex; gap: 8px;">
-                            <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
-                            <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
-                        </div>`;
-                        addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
+                        
+                        // Disk Streaming Setup (Origin Private File System)
+                        (async () => {
+                            try {
+                                const opfsRoot = await navigator.storage.getDirectory();
+                                const fileHandle = await opfsRoot.getFileHandle(txId, { create: true });
+                                const writable = await fileHandle.createWritable();
+                                
+                                fileTransfers[txId] = { 
+                                    meta: data, 
+                                    received: 0, 
+                                    senderId: sid, 
+                                    paused: false, 
+                                    startTime: Date.now(),
+                                    fileHandle: fileHandle,
+                                    writable: writable,
+                                    writtenChunks: new Set()
+                                }; 
+                                
+                                const progHtml = `
+                                <div>📥 Downloading <b>${data.name}</b> <span id="stats-rx-${txId}" style="font-size:12px; color:#949ba4;">(0%, 0 KB/s)</span></div>
+                                <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
+                                <div style="margin-top: 8px; display: flex; gap: 8px;">
+                                    <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
+                                    <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
+                                </div>`;
+                                addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
+                            } catch (e) {
+                                console.error("Disk initialization failed", e);
+                            }
+                        })();
                     }
                     else if (data.type === 'file-chunk') {
-                        const tr = fileTransfers[data.txId]; if(!tr) return;
+                        const tr = fileTransfers[data.txId]; if(!tr || !tr.writable) return;
                         
-                        crypto.subtle.digest('SHA-256', data.data).then(hashBuffer => {
+                        crypto.subtle.digest('SHA-256', data.data).then(async hashBuffer => {
                             const hashArray = Array.from(new Uint8Array(hashBuffer));
                             const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
                             
@@ -660,22 +699,26 @@
 								return; 
 							}
 
-                            // SMART RECOVERY: Detect if chunks were skipped during an internet spike 
-                            // and request the missing pieces automatically.
+                            // SMART RECOVERY
                             if (tr.lastIndex !== undefined && data.index > tr.lastIndex + 1) {
                                 for (let i = tr.lastIndex + 1; i < data.index; i++) {
-                                    if (!tr.chunks[i] && (!tr.nacked || !tr.nacked[i])) {
+                                    if (!tr.writtenChunks.has(i) && (!tr.nacked || !tr.nacked[i])) {
                                         tr.nacked = tr.nacked || {};
-                                        tr.nacked[i] = true; // Prevent spamming NACKs
+                                        tr.nacked[i] = true;
                                         conn.send({ type: 'file-nack', txId: data.txId, index: i });
                                     }
                                 }
                             }
                             tr.lastIndex = Math.max(tr.lastIndex || 0, data.index);
 
-                            // Prevent double byte counting if a delayed chunk arrives twice
-                            if (!tr.chunks[data.index]) {
-                                tr.chunks[data.index] = data.data; 
+                            // Directly write chunks to the Hard Drive
+                            if (!tr.writtenChunks.has(data.index)) {
+                                tr.writtenChunks.add(data.index); 
+                                
+                                const CHUNK_SIZE = 65536;
+                                const offset = data.index * CHUNK_SIZE;
+                                await tr.writable.write({ type: 'write', position: offset, data: data.data });
+                                
                                 tr.received += data.data.byteLength;
                                 
                                 const percentValue = Math.min((tr.received / tr.meta.size) * 100, 100);
@@ -689,34 +732,37 @@
                                     statsEl.innerText = `(${percentValue.toFixed(1)}%, ${formatBytes(speed)}/s)`;
                                 }
                                 
-                                // Restore original sender name in UI if it was showing (Reconnecting...)
                                 const msgNode = $(`msg-rx-${data.txId}`);
                                 if (msgNode) {
                                     const info = msgNode.querySelector('.msg-info');
                                     if (info && info.innerHTML.includes('Reconnecting')) info.innerHTML = peerNames[sid] || "Someone";
                                 }
-                            }
 
-                            if (tr.received >= tr.meta.size) {
-                                const msgNode = $(`msg-rx-${data.txId}`);
-                                if (msgNode) msgNode.remove();
+                                if (tr.received >= tr.meta.size) {
+                                    await tr.writable.close();
 
-                                const url = URL.createObjectURL(new Blob(tr.chunks, { type: tr.meta.fileType }));
-                                const senderName = peerNames[sid] || "Someone";
+                                    const msgNode = $(`msg-rx-${data.txId}`);
+                                    if (msgNode) msgNode.remove();
 
-                                if (tr.meta.fileType.startsWith('image/')) {
-                                    addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
-                                } else if (tr.meta.fileType.startsWith('video/')) {
-                                    addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
-                                } else if (tr.meta.fileType.startsWith('audio/')) {
-                                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
-                                } else {
-                                    addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
+                                    const file = await tr.fileHandle.getFile();
+                                    const fileWithMime = file.slice(0, file.size, tr.meta.fileType);
+                                    const url = URL.createObjectURL(fileWithMime);
+                                    const senderName = peerNames[sid] || "Someone";
+
+                                    if (tr.meta.fileType.startsWith('image/')) {
+                                        addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
+                                    } else if (tr.meta.fileType.startsWith('video/')) {
+                                        addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
+                                    } else if (tr.meta.fileType.startsWith('audio/')) {
+                                        addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
+                                    } else {
+                                        addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
+                                    }
+
+                                    playJoinSound();
+                                    notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
+                                    delete fileTransfers[data.txId];
                                 }
-
-                                playJoinSound();
-                                notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
-                                delete fileTransfers[data.txId];
                             }
                         }).catch(err => console.error("Hash calculation failed", err));
                     }
