@@ -642,11 +642,34 @@
 								return; 
 							}
 
-                            tr.chunks[data.index] = data.data; 
-                            tr.received += data.data.byteLength;
-                            
-                            const bar = $(`bar-rx-${data.txId}`);
-                            if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
+                            // SMART RECOVERY: Detect if chunks were skipped during an internet spike 
+                            // and request the missing pieces automatically.
+                            if (tr.lastIndex !== undefined && data.index > tr.lastIndex + 1) {
+                                for (let i = tr.lastIndex + 1; i < data.index; i++) {
+                                    if (!tr.chunks[i] && (!tr.nacked || !tr.nacked[i])) {
+                                        tr.nacked = tr.nacked || {};
+                                        tr.nacked[i] = true; // Prevent spamming NACKs
+                                        conn.send({ type: 'file-nack', txId: data.txId, index: i });
+                                    }
+                                }
+                            }
+                            tr.lastIndex = Math.max(tr.lastIndex || 0, data.index);
+
+                            // Prevent double byte counting if a delayed chunk arrives twice
+                            if (!tr.chunks[data.index]) {
+                                tr.chunks[data.index] = data.data; 
+                                tr.received += data.data.byteLength;
+                                
+                                const bar = $(`bar-rx-${data.txId}`);
+                                if (bar) bar.style.width = `${Math.min((tr.received / tr.meta.size) * 100, 100)}%`;
+                                
+                                // Restore original sender name in UI if it was showing (Reconnecting...)
+                                const msgNode = $(`msg-rx-${data.txId}`);
+                                if (msgNode) {
+                                    const info = msgNode.querySelector('.msg-info');
+                                    if (info && info.innerHTML.includes('Reconnecting')) info.innerHTML = peerNames[sid] || "Someone";
+                                }
+                            }
 
                             if (tr.received >= tr.meta.size) {
                                 const msgNode = $(`msg-rx-${data.txId}`);
@@ -776,13 +799,15 @@
             
             if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
 
+            // SMARTER WAY: Do not delete the transfer. Just flag it visually. 
+            // It will resume automatically if they reconnect.
             for (let tid in fileTransfers) {
                 if (fileTransfers[tid].senderId === id) {
                     const msgNode = $(`msg-rx-${tid}`);
                     if (msgNode) {
-                        msgNode.innerHTML = `<div class="msg-info">${uname}</div><div style="color: #da373c;">❌ Download Failed: User disconnected</div>`;
+                        const info = msgNode.querySelector('.msg-info');
+                        if (info) info.innerHTML = `${uname} <span style="color: #f0b232;">(Reconnecting...)</span>`;
                     }
-                    delete fileTransfers[tid];
                 }
             }
 
@@ -979,18 +1004,11 @@
             while (offset < file.size) {
                 if (activeTransfers.tx[txId].canceled) return;
 
-                while (activeTransfers.tx[txId].paused && !activeTransfers.tx[txId].canceled) {
+                // SMART AUTO-FREEZE: If the user pauses manually OR if the internet drops (0 peers), 
+                // just wait. It will instantly resume when connection is restored.
+                while ((activeTransfers.tx[txId].paused && !activeTransfers.tx[txId].canceled) || Object.keys(fileConns).length === 0) {
                     await new Promise(r => setTimeout(r, 100));
-                }
-
-                if (activeTransfers.tx[txId].canceled) return;
-
-                if (Object.keys(connections).length === 0) {
-                    const msgNode = $(`msg-${txId}`);
-                    if (msgNode) {
-                        msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Failed: Everyone left the room</div>`;
-                    }
-                    return; 
+                    if (activeTransfers.tx[txId].canceled) return;
                 }
 
                 const { buffer, hash } = await readChunkViaWorker(file, offset, CHUNK_SIZE, txId, chunkCount);
