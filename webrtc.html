@@ -229,7 +229,7 @@
             <input type="file" id="soundboard-input" accept="audio/*" style="display: none;">
             <label for="soundboard-input" class="media-btn highlight-hover" title="Soundboard">🎵</label>
             
-            <input type="file" id="file-input" style="display: none;">
+            <input type="file" id="file-input" style="display: none;" multiple>
             <label for="file-input" class="media-btn highlight-hover" title="Send File/Photo">📎</label>
             
             <input type="text" id="msg-input" placeholder="Type a message (or Drag/Paste files)..." disabled>
@@ -326,41 +326,19 @@
             return sdp;
         }
 
-        const fileWorkerCode = `
-            self.onmessage = async (e) => {
-                try {
-                    const chunk = e.data.file.slice(e.data.offset, e.data.offset + e.data.chunkSize);
-                    const buffer = await chunk.arrayBuffer();
-                    
-                    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-                    const hashArray = Array.from(new Uint8Array(hashBuffer));
-                    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-                    self.postMessage({ buffer: buffer, hash: hashHex, txId: e.data.txId, index: e.data.index }, [buffer]);
-                } catch (err) {
-                    self.postMessage({ error: err.message, txId: e.data.txId, index: e.data.index });
-                }
-            };
-        `;
-        const fileWorker = new Worker(URL.createObjectURL(new Blob([fileWorkerCode], { type: 'application/javascript' })));
-        const readChunkViaWorker = (file, offset, chunkSize, txId, index) => {
-            return new Promise((resolve, reject) => {
-                const handler = (e) => {
-                    if (e.data.txId === txId && e.data.index === index) {
-                        fileWorker.removeEventListener('message', handler);
-                        if (e.data.error) reject(new Error(e.data.error));
-                        else resolve({ buffer: e.data.buffer, hash: e.data.hash });
-                    }
-                };
-                fileWorker.addEventListener('message', handler);
-                fileWorker.postMessage({ file, offset, chunkSize, txId, index });
-            });
-        };
+        // === FileV2: durable transfer constants (no per-chunk hashing on hot path) ===
+        const FILE_V2_CHUNK = 65536;
+        const FILE_V2_WINDOW = 6;
+        const FILE_V2_ACK_TIMEOUT = 3000;
+        const FILE_V2_DRAIN_TIMEOUT = 4000;
+        const FILE_V2_MAX_CHUNK_MSG = 120; // cap missing-list per control msg
+        const makeTxId = () => 'v2-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
         let myName = "", myId = "", peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
         
-        const connections = {}, fileConns = {}, peerNames = {}, fileTransfers = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
+        const connections = {}, fileConns = {}, peerNames = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] } };
 
         const dlIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
 
@@ -371,59 +349,715 @@
         const typingUsers = new Set();
         let tempPeer = null;
 
-        const activeTransfers = { tx: {} };
+        // ================= FileV2 durable transfer =================
+        // Per-peer independent sessions. One slow/dead peer never blocks others or later files.
+        const FileV2Out = {}; // txId -> sender Tx
+        const FileV2In = {};  // txId -> receiver Rx
+        const FileV2Order = []; // txIds in enqueue order (per-peer sequential)
+        const FileV2Tombstones = new Set();
+
+        function v2WindowFor(sid) {
+            try {
+                const c = fileConns[sid];
+                const buffered = c && c.dataChannel ? c.dataChannel.bufferedAmount : 0;
+                if (buffered > 1024 * 1024) return 2;
+                if ((lastRealPing[sid] || 0) > 300) return 2;
+            } catch (e) {}
+            return FILE_V2_WINDOW;
+        }
+
+        function safeFileSend(sid, msg) {
+            try {
+                const c = fileConns[sid];
+                if (!c || !c.open) return false;
+                c.send(msg);
+                return true;
+            } catch (e) { return false; }
+        }
+
+        function v2WaitDrain(sid) {
+            return new Promise((resolve) => {
+                let done = false;
+                const finish = (v) => { if (!done) { done = true; resolve(v); } };
+                try {
+                    const c = fileConns[sid];
+                    const dc = c && c.dataChannel;
+                    if (!dc || typeof dc.bufferedAmount !== 'number') return finish(true);
+                    if (dc.bufferedAmount < 1024 * 1024) return finish(true);
+                    try { dc.bufferedAmountLowThreshold = 256 * 1024; } catch (e) {}
+                    const onLow = () => { try { dc.removeEventListener('bufferedamountlow', onLow); } catch (e) {} finish(true); };
+                    try { dc.addEventListener('bufferedamountlow', onLow); } catch (e) { return finish(true); }
+                    setTimeout(() => { try { dc.removeEventListener('bufferedamountlow', onLow); } catch (e) {} finish(dc.bufferedAmount < 4 * 1024 * 1024); }, FILE_V2_DRAIN_TIMEOUT);
+                } catch (e) { finish(true); }
+            });
+        }
+
+        function v2EarlierPending(txId, sid) {
+            const idx = FileV2Order.indexOf(txId);
+            if (idx <= 0) return false;
+            for (let i = 0; i < idx; i++) {
+                const earlier = FileV2Out[FileV2Order[i]];
+                if (!earlier || earlier.canceled) continue;
+                const ps = earlier.peers[sid];
+                if (ps && !ps.done && !ps.canceled) return true;
+            }
+            return false;
+        }
+
+        function v2MissingFor(txId, sid) {
+            const tx = FileV2Out[txId];
+            const ps = tx && tx.peers[sid];
+            if (!tx || !ps) return [];
+            const out = [];
+            for (let i = 0; i < tx.totalChunks; i++) {
+                if (!ps.acked.has(i) && !ps.inflight.has(i)) out.push(i);
+                if (out.length >= 200) break;
+            }
+            return out;
+        }
+
+        function v2UpdateSenderUI(txId) {
+            const tx = FileV2Out[txId];
+            if (!tx) return;
+            const now = Date.now();
+            if (now - (tx.uiThrottle || 0) < 250) return;
+            tx.uiThrottle = now;
+            const peerIds = Object.keys(tx.peers);
+            let donePeers = 0, stalledPeers = 0, ackedMax = 0, ackedMin = tx.totalChunks;
+            for (const sid of peerIds) {
+                const ps = tx.peers[sid];
+                const n = ps.acked.size;
+                ackedMax = Math.max(ackedMax, n);
+                ackedMin = Math.min(ackedMin, n);
+                if (ps.done) donePeers++;
+                else if (ps.stalled || !ps.connected) stalledPeers++;
+            }
+            const denom = Math.max(tx.totalChunks, 1);
+            const pct = Math.min((ackedMax / denom) * 100, 100);
+            const bar = $(`bar-${txId}`);
+            if (bar) bar.style.width = `${pct}%`;
+            const stats = $(`stats-${txId}`);
+            if (stats) {
+                const total = peerIds.length;
+                let extra = `${donePeers}/${total} peers`;
+                if (stalledPeers) extra += `, ${stalledPeers} retrying`;
+                if (tx.paused) extra += `, paused`;
+                stats.innerText = `(${pct.toFixed(1)}%, ${extra})`;
+            }
+            const pauseBtn = $(`pause-${txId}`);
+            if (pauseBtn && !tx.done) pauseBtn.innerHTML = tx.paused ? "▶️ Resume" : "⏸️ Pause";
+        }
+
+        function v2MarkPeerDone(txId, sid) {
+            const tx = FileV2Out[txId];
+            if (!tx) return;
+            const ps = tx.peers[sid];
+            if (!ps || ps.done) return;
+            for (const t of ps.inflight.values()) { try { clearTimeout(t); } catch (e) {} }
+            ps.inflight.clear();
+            ps.resend.length = 0;
+            ps.done = true;
+            ps.stalled = false;
+            safeFileSend(sid, { type: 'file-v2-done', txId });
+            v2UpdateSenderUI(txId);
+            // Pump next queued file for this peer (per-peer sequential).
+            for (const nextId of FileV2Order) {
+                if (nextId === txId) continue;
+                const nt = FileV2Out[nextId];
+                if (nt && nt.peers[sid] && !nt.peers[sid].done && !nt.peers[sid].canceled) v2Pump(nextId, sid);
+            }
+            v2MaybeFinishTx(txId);
+        }
+
+        function v2MaybeFinishTx(txId) {
+            const tx = FileV2Out[txId];
+            if (!tx || tx.done) return;
+            const peers = Object.values(tx.peers);
+            if (!peers.length) return;
+            if (peers.every(p => p.done || p.canceled)) {
+                tx.done = true;
+                const msgNode = $(`msg-${txId}`);
+                if (msgNode && !tx.canceled) {
+                    try {
+                        const url = URL.createObjectURL(tx.file);
+                        msgNode.remove();
+                        renderCompletedFile(url, tx.name, tx.mime || tx.file.type, "You", 'mine');
+                    } catch (e) {
+                        msgNode.innerHTML = `<div class="msg-info">You</div><div>✅ Shared: <b>${escapeHTML(tx.name)}</b> (all reachable peers done)</div>`;
+                    }
+                }
+                // Keep Tx 5 min to serve late joiners via hello, then GC.
+                setTimeout(() => { delete FileV2Out[txId]; const i = FileV2Order.indexOf(txId); if (i >= 0) FileV2Order.splice(i, 1); }, 5 * 60 * 1000);
+            }
+            v2UpdateSenderUI(txId);
+        }
+
+        async function v2HashInBackground(tx) {
+            try {
+                if (!tx.file || tx.file.size > 300 * 1024 * 1024) return;
+                const buf = await tx.file.arrayBuffer();
+                const h = await crypto.subtle.digest('SHA-256', buf);
+                tx.fileHash = Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
+                tx.hashReady = true;
+            } catch (e) { tx.fileHash = null; }
+        }
+
+        async function v2SendOne(txId, sid, index) {
+            const tx = FileV2Out[txId];
+            const ps = tx && tx.peers[sid];
+            if (!tx || !ps || tx.canceled || ps.canceled || ps.done) return false;
+            try {
+                const start = index * FILE_V2_CHUNK;
+                const end = Math.min(start + FILE_V2_CHUNK, tx.size);
+                const buf = await tx.file.slice(start, end).arrayBuffer();
+                if (tx.canceled || ps.canceled || ps.done) return false;
+                if (ps.acked.has(index)) return true;
+                const ok = safeFileSend(sid, { type: 'file-v2-chunk', txId, index, data: buf });
+                if (!ok) return false;
+                try { clearTimeout(ps.inflight.get(index)); } catch (e) {}
+                const timer = setTimeout(() => {
+                    try {
+                        const t2 = FileV2Out[txId];
+                        const p2 = t2 && t2.peers[sid];
+                        if (!t2 || !p2 || p2.done || p2.canceled || t2.canceled) return;
+                        p2.inflight.delete(index);
+                        if (!p2.acked.has(index)) {
+                            p2.resend.push(index);
+                            p2.stalled = p2.resend.length > 12 || p2.inflight.size === 0;
+                            v2UpdateSenderUI(txId);
+                            v2Pump(txId, sid);
+                        }
+                    } catch (e) {}
+                }, FILE_V2_ACK_TIMEOUT);
+                ps.inflight.set(index, timer);
+                return true;
+            } catch (e) { return false; }
+        }
+
+        async function v2Pump(txId, sid) {
+            const tx = FileV2Out[txId];
+            if (!tx) return;
+            const ps = tx.peers[sid];
+            if (!ps || ps.done || ps.canceled || ps.pumping) return;
+            ps.pumping = true;
+            try {
+                while (true) {
+                    if (tx.canceled || ps.canceled || ps.done) break;
+                    if (tx.paused || ps.paused) { await sleep(350); continue; }
+                    if (v2EarlierPending(txId, sid)) { await sleep(500); continue; }
+                    const conn = fileConns[sid];
+                    if (!conn || !conn.open) {
+                        ps.connected = false; ps.stalled = true;
+                        v2UpdateSenderUI(txId);
+                        await sleep(1500);
+                        continue;
+                    }
+                    ps.connected = true;
+                    const drained = await v2WaitDrain(sid);
+                    if (tx.canceled || ps.canceled || ps.done) break;
+                    if (tx.paused || ps.paused) continue;
+                    if (!drained) {
+                        ps.stalled = true;
+                        v2UpdateSenderUI(txId);
+                        await sleep(1200);
+                        continue;
+                    }
+                    if (ps.inflight.size >= v2WindowFor(sid)) { await sleep(120); continue; }
+                    let idx = null;
+                    while (ps.resend.length) {
+                        const cand = ps.resend.shift();
+                        if (!ps.acked.has(cand) && !ps.inflight.has(cand)) { idx = cand; break; }
+                    }
+                    if (idx === null) {
+                        while (ps.next < tx.totalChunks && (ps.acked.has(ps.next) || ps.inflight.has(ps.next))) ps.next++;
+                        if (ps.next < tx.totalChunks) { idx = ps.next++; }
+                        else {
+                            if (ps.inflight.size === 0) {
+                                if (ps.acked.size >= tx.totalChunks) { v2MarkPeerDone(txId, sid); break; }
+                                const missing = v2MissingFor(txId, sid);
+                                if (!missing.length) {
+                                    if (ps.acked.size >= tx.totalChunks) { v2MarkPeerDone(txId, sid); break; }
+                                    await sleep(900);
+                                    continue;
+                                }
+                                for (const m of missing.slice(0, v2WindowFor(sid))) ps.resend.push(m);
+                                continue;
+                            }
+                            await sleep(200);
+                            continue;
+                        }
+                    }
+                    const ok = await v2SendOne(txId, sid, idx);
+                    if (!ok) {
+                        try { ps.resend.unshift(idx); } catch (e) {}
+                        ps.failCount = (ps.failCount || 0) + 1;
+                        if (ps.failCount > 3) { ps.stalled = true; v2UpdateSenderUI(txId); }
+                        await sleep(Math.min(400 * ps.failCount, 4000));
+                        continue;
+                    }
+                    ps.failCount = 0;
+                    if (ps.stalled && ps.inflight.size <= 2 && ps.resend.length === 0) { ps.stalled = false; }
+                    v2UpdateSenderUI(txId);
+                    if (ps.acked.size >= tx.totalChunks && ps.inflight.size === 0) { v2MarkPeerDone(txId, sid); break; }
+                    await sleep(0);
+                }
+            } finally {
+                try { ps.pumping = false; } catch (e) {}
+                v2UpdateSenderUI(txId);
+            }
+        }
+
+        function v2AnnounceTo(sid, txId) {
+            const tx = FileV2Out[txId];
+            if (!tx || tx.canceled) return;
+            if (!tx.peers[sid]) tx.peers[sid] = { acked: new Set(), inflight: new Map(), resend: [], next: 0, done: false, canceled: false, paused: false, stalled: false, connected: true, failCount: 0, pumping: false };
+            safeFileSend(sid, { type: 'file-v2-announce', txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null });
+            v2Pump(txId, sid);
+        }
+
+        async function v2EnqueueFile(file) {
+            if (!file) return;
+            if (Object.keys(connections).length === 0) { addSystemMsg("❌ No one is in the room to receive files!"); return; }
+            const txId = makeTxId();
+            const totalChunks = Math.ceil(file.size / FILE_V2_CHUNK);
+            const tx = {
+                txId, file, name: file.name || (`Pasted Media - ${new Date().toLocaleTimeString()}`),
+                mime: file.type || 'application/octet-stream', size: file.size, totalChunks,
+                fileHash: null, hashReady: false, createdAt: Date.now(),
+                paused: false, canceled: false, done: false, peers: {}, startTime: Date.now(), uiThrottle: 0
+            };
+            FileV2Out[txId] = tx;
+            FileV2Order.push(txId);
+            if (totalChunks === 0) {
+                const progHtml = `<div>📤 Shared empty file <b>${escapeHTML(tx.name)}</b></div>`;
+                addMessage(progHtml, "You", 'mine', `msg-${txId}`);
+                tx.done = true;
+                return;
+            }
+            const progHtml = `
+            <div>📤 Uploading <b>${escapeHTML(tx.name)}</b> <span id="stats-${txId}" style="font-size:12px; color:#949ba4;">(starting...)</span></div>
+            <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
+            <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
+                <button class="tx-btn" id="retry-${txId}" onclick="window.retryTx('${txId}')">🔁 Retry stalled</button>
+                <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
+            </div>`;
+            addMessage(progHtml, "You", 'mine', `msg-${txId}`);
+            // Announce to each currently-connected peer independently; one failure can't block others.
+            const targets = Object.keys(fileConns).filter(sid => { try { return fileConns[sid].open; } catch (e) { return false; } });
+            if (!targets.length) { addSystemMsg("❌ File channel not ready yet — will retry when peers connect. File queued."); }
+            for (const sid of targets) {
+                try { v2AnnounceTo(sid, txId); } catch (e) { console.warn('announce failed for', sid, e); }
+            }
+            v2UpdateSenderUI(txId);
+            v2HashInBackground(tx);
+        }
+
+        function renderCompletedFile(url, name, mime, senderName, kind) {
+            const safeName = escapeHTML(name || 'file');
+            const dl = (label) => `<a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} ${label}</a>`;
+            if ((mime || '').startsWith('image/')) addMessage(`<img src="${url}">${dl('Download Image')}`, senderName, kind);
+            else if ((mime || '').startsWith('video/')) addMessage(`<video src="${url}" controls preload="metadata"></video>${dl('Download Video')}`, senderName, kind);
+            else if ((mime || '').startsWith('audio/')) addMessage(`<audio src="${url}" controls></audio>${dl('Download Audio')}`, senderName, kind);
+            else addMessage(`<div>📂 ${safeName}</div>${dl('Download File')}`, senderName, kind);
+        }
 
         window.toggleTx = (txId) => {
-            const tx = activeTransfers.tx[txId];
-            if (tx) {
-                tx.paused = !tx.paused;
-                const btn = $(`pause-${txId}`);
-                if (btn) btn.innerHTML = tx.paused ? "▶️ Resume" : "⏸️ Pause";
-                bcast({ type: 'file-control', txId, action: tx.paused ? 'pause' : 'resume' });
+            const tx = FileV2Out[txId];
+            if (!tx || tx.done) return;
+            tx.paused = !tx.paused;
+            for (const sid of Object.keys(tx.peers)) {
+                safeFileSend(sid, { type: 'file-v2-control', txId, action: tx.paused ? 'pause' : 'resume' });
+                if (!tx.paused) v2Pump(txId, sid);
             }
+            v2UpdateSenderUI(txId);
+        };
+
+        window.retryTx = (txId) => {
+            const tx = FileV2Out[txId];
+            if (!tx || tx.done) return;
+            for (const sid of Object.keys(fileConns)) {
+                if (!tx.peers[sid]) {
+                    try { v2AnnounceTo(sid, txId); } catch (e) {}
+                    continue;
+                }
+                const ps = tx.peers[sid];
+                if (ps.done || ps.canceled) continue;
+                ps.stalled = false; ps.failCount = 0; ps.paused = false;
+                try { safeFileSend(sid, { type: 'file-v2-announce', txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null }); } catch (e) {}
+                v2Pump(txId, sid);
+            }
+            // Also pick up brand-new peers that connected after enqueue.
+            for (const sid of Object.keys(fileConns)) {
+                try { if (!tx.peers[sid] && fileConns[sid].open) v2AnnounceTo(sid, txId); } catch (e) {}
+            }
+            v2UpdateSenderUI(txId);
+            addSystemMsg(`🔁 Retrying stalled peers for <b>${escapeHTML(tx.name)}</b>...`);
         };
 
         window.cancelTx = (txId) => {
-            const tx = activeTransfers.tx[txId];
-            if (tx) {
-                tx.canceled = true;
-                bcast({ type: 'file-control', txId, action: 'cancel' });
-                const msgNode = $(`msg-${txId}`);
-                if (msgNode) msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Canceled</div>`;
+            const tx = FileV2Out[txId];
+            if (!tx) return;
+            tx.canceled = true;
+            for (const sid of Object.keys(tx.peers)) {
+                const ps = tx.peers[sid];
+                ps.canceled = true;
+                for (const t of ps.inflight.values()) { try { clearTimeout(t); } catch (e) {} }
+                ps.inflight.clear();
+                safeFileSend(sid, { type: 'file-v2-control', txId, action: 'cancel' });
             }
+            const msgNode = $(`msg-${txId}`);
+            if (msgNode) msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Canceled</div>`;
+            setTimeout(() => { delete FileV2Out[txId]; const i = FileV2Order.indexOf(txId); if (i >= 0) FileV2Order.splice(i, 1); }, 30000);
         };
 
-        window.toggleRx = (txId, sid) => {
-            const tr = fileTransfers[txId];
-            const conn = fileConns[sid];
-            if (tr && conn && conn.open) {
-                tr.paused = !tr.paused;
-                const btn = $(`pause-rx-${txId}`);
-                if (btn) btn.innerHTML = tr.paused ? "▶️ Resume" : "⏸️ Pause";
-                conn.send({ type: 'file-control-rx', txId, action: tr.paused ? 'pause' : 'resume' });
+        // ================= FileV2 receiver =================
+        function v2UpdateRxUI(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done) return;
+            const now = Date.now();
+            if (now - (rx.uiThrottle || 0) < 300) return;
+            rx.uiThrottle = now;
+            const pct = rx.totalChunks ? Math.min((rx.written.size / rx.totalChunks) * 100, 100) : 100;
+            const bar = $(`bar-rx-${txId}`);
+            if (bar) bar.style.width = `${pct}%`;
+            const stats = $(`stats-rx-${txId}`);
+            if (stats) {
+                const elapsed = (Date.now() - rx.startTime) / 1000;
+                const speed = elapsed > 0 ? rx.receivedBytes / elapsed : 0;
+                let extra = `${pct.toFixed(1)}%, ${formatBytes(speed)}/s`;
+                if (rx.paused) extra += `, paused`;
+                if (rx.stalled) extra += `, waiting for sender…`;
+                stats.innerText = `(${extra})`;
             }
-        };
+        }
 
-        window.cancelRx = async (txId, sid) => {
-            const tr = fileTransfers[txId];
-            const conn = fileConns[sid];
-            
-            // Notify the sender that this specific peer is canceling
-            if (conn && conn.open) {
-                conn.send({ type: 'file-control-rx', txId, action: 'cancel' });
-            }
-
-            if (tr) {
+        function v2QueueAck(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.ackTimer) return;
+            rx.ackTimer = setTimeout(() => {
                 try {
-                    if (tr.writable) await tr.writable.close();
-                    const opfsRoot = await navigator.storage.getDirectory();
-                    await opfsRoot.removeEntry(txId);
-                } catch(e) {}
+                    rx.ackTimer = null;
+                    if (!rx || rx.canceled || rx.done) return;
+                    if (!rx.ackPending.length) return;
+                    const batch = rx.ackPending.splice(0, 50);
+                    safeFileSend(rx.senderId, { type: 'file-v2-ack', txId, acked: batch });
+                } catch (e) {}
+            }, 150);
+        }
+
+        function v2SendReady(txId) {
+            const rx = FileV2In[txId];
+            if (!rx) return;
+            const have = Array.from(rx.written).slice(0, 5000);
+            safeFileSend(rx.senderId, { type: 'file-v2-ready', txId, have, haveCount: rx.written.size, totalChunks: rx.totalChunks });
+        }
+
+        function v2SendMissing(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done || rx.canceled || rx.paused) return;
+            const missing = [];
+            for (let i = 0; i < rx.totalChunks; i++) {
+                if (!rx.written.has(i)) missing.push(i);
+                if (missing.length >= FILE_V2_MAX_CHUNK_MSG) break;
             }
-            delete fileTransfers[txId];
-            const msgNode = $(`msg-rx-${txId}`);
-            if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Download Canceled</div>`;
+            if (missing.length) safeFileSend(rx.senderId, { type: 'file-v2-missing', txId, missing });
+        }
+
+        async function v2OnAnnounce(data, sid) {
+            const txId = data.txId;
+            if (!txId || FileV2Tombstones.has(txId)) return;
+            let rx = FileV2In[txId];
+            if (rx) {
+                // Duplicate announce (retry / reconnect): re-sync without wiping progress.
+                rx.senderId = rx.senderId || sid;
+                v2SendReady(txId);
+                v2UpdateRxUI(txId);
+                return;
+            }
+            rx = {
+                txId, name: data.name || 'file', mime: data.mime || 'application/octet-stream',
+                size: data.size || 0, totalChunks: data.totalChunks || 0, fileHash: data.fileHash || null,
+                senderId: sid, written: new Set(), receivedBytes: 0, startTime: Date.now(),
+                paused: false, canceled: false, done: false, stalled: false,
+                useOpfs: false, fileHandle: null, writable: null, writeChain: Promise.resolve(),
+                memChunks: new Map(), ackPending: [], ackTimer: null, missingTimer: null,
+                lastActivity: Date.now(), initDone: false, pendingEarly: [], uiThrottle: 0, retries: 0
+            };
+            FileV2In[txId] = rx;
+            if (!rx.totalChunks) {
+                // Empty file: complete immediately.
+                rx.initDone = true; rx.done = true;
+                const senderName = peerNames[sid] || "Someone";
+                const blob = new Blob([], { type: rx.mime });
+                renderCompletedFile(URL.createObjectURL(blob), rx.name, rx.mime, senderName, 'theirs');
+                safeFileSend(sid, { type: 'file-v2-ack', txId, acked: [], complete: true });
+                delete FileV2In[txId];
+                return;
+            }
+            const progHtml = `
+            <div>📥 Downloading <b>${escapeHTML(rx.name)}</b> <span id="stats-rx-${txId}" style="font-size:12px; color:#949ba4;">(starting...)</span></div>
+            <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
+            <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}')">⏸️ Pause</button>
+                <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}')">❌ Cancel</button>
+            </div>`;
+            addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
+            // Init storage async; buffer early chunks meanwhile (fixes old drop-on-early-chunk bug).
+            try {
+                const opfsRoot = await navigator.storage.getDirectory();
+                const fh = await opfsRoot.getFileHandle(txId, { create: true });
+                const w = await fh.createWritable();
+                if (FileV2In[txId] !== rx || rx.canceled) { try { await w.close(); } catch (e) {} return; }
+                rx.fileHandle = fh; rx.writable = w; rx.useOpfs = true;
+            } catch (e) {
+                rx.useOpfs = false;
+            }
+            rx.initDone = true;
+            rx.lastActivity = Date.now();
+            v2SendReady(txId);
+            // Flush early chunks in order.
+            if (rx.pendingEarly.length) {
+                const early = rx.pendingEarly.splice(0, rx.pendingEarly.length);
+                early.sort((a, b) => a.index - b.index);
+                for (const c of early) v2StoreChunk(txId, c.index, c.data);
+            }
+            // Missing sweep: ask for gaps only when stalled (no activity), never spam.
+            if (rx.missingTimer) clearInterval(rx.missingTimer);
+            rx.missingTimer = setInterval(() => {
+                try {
+                    const r = FileV2In[txId];
+                    if (!r || r.done || r.canceled || r.paused) return;
+                    if (Date.now() - r.lastActivity > 1800 && r.written.size < r.totalChunks) {
+                        r.stalled = true;
+                        v2SendMissing(txId);
+                        v2UpdateRxUI(txId);
+                    }
+                } catch (e) {}
+            }, 2000);
+            v2UpdateRxUI(txId);
+        }
+
+        function v2StoreChunk(txId, index, buf) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.canceled || rx.done) return;
+            if (typeof index !== 'number' || index < 0 || index >= rx.totalChunks) return;
+            if (rx.written.has(index)) {
+                rx.ackPending.push(index);
+                v2QueueAck(txId);
+                return;
+            }
+            const byteLen = buf ? (buf.byteLength ?? buf.length ?? buf.size ?? 0) : 0;
+            if (!buf || byteLen === 0) {
+                // Corrupt/empty payload (e.g. failed structured clone) — ask sender to resend, don't poison bitmap.
+                try { safeFileSend(rx.senderId, { type: 'file-v2-missing', txId, missing: [index] }); } catch (e) {}
+                return;
+            }
+            const commit = () => {
+                if (rx.written.has(index)) return;
+                rx.written.add(index);
+                rx.receivedBytes += byteLen;
+                rx.lastActivity = Date.now();
+                rx.stalled = false;
+                rx.ackPending.push(index);
+                v2QueueAck(txId);
+                v2UpdateRxUI(txId);
+                const info = $(`msg-rx-${txId}`) && $(`msg-rx-${txId}`).querySelector('.msg-info');
+                if (info && info.innerHTML.includes('Reconnecting')) info.innerHTML = peerNames[rx.senderId] || "Someone";
+                if (rx.written.size >= rx.totalChunks) v2FinishRx(txId);
+            };
+            if (!rx.initDone) {
+                if (rx.pendingEarly.length < 300) rx.pendingEarly.push({ index, data: buf });
+                return;
+            }
+            if (rx.paused) {
+                // Still store (sender may have in-flight), but don't advance missing logic.
+                // Fall through to store.
+            }
+            if (rx.useOpfs && rx.writable) {
+                rx.writeChain = rx.writeChain.then(async () => {
+                    try {
+                        await rx.writable.write({ type: 'write', position: index * FILE_V2_CHUNK, data: buf });
+                        commit();
+                    } catch (e) {
+                        // OPFS write failed -> fallback to memory for this chunk.
+                        rx.memChunks.set(index, buf);
+                        commit();
+                    }
+                }).catch(() => { rx.memChunks.set(index, buf); commit(); });
+            } else {
+                rx.memChunks.set(index, buf);
+                commit();
+            }
+        }
+
+        async function v2FinishRx(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done) return;
+            rx.done = true;
+            if (rx.missingTimer) { try { clearInterval(rx.missingTimer); } catch (e) {} }
+            if (rx.ackTimer) { try { clearTimeout(rx.ackTimer); } catch (e) {} rx.ackTimer = null; }
+            try {
+                let blob;
+                if (rx.useOpfs && rx.fileHandle) {
+                    try { await rx.writable.close(); } catch (e) {}
+                    try {
+                        const f = await rx.fileHandle.getFile();
+                        blob = f.slice(0, f.size, rx.mime);
+                    } catch (e) {
+                        blob = new Blob([...rx.memChunks.entries()].sort((a, b) => a[0] - b[0]).map(e => e[1]), { type: rx.mime });
+                    }
+                } else {
+                    const parts = [];
+                    for (let i = 0; i < rx.totalChunks; i++) {
+                        const c = rx.memChunks.get(i);
+                        if (c) parts.push(c);
+                    }
+                    blob = new Blob(parts, { type: rx.mime });
+                }
+                // Optional end-to-end hash check (background hash may arrive as null -> skip).
+                if (rx.fileHash) {
+                    try {
+                        const ab = await blob.arrayBuffer();
+                        const h = await crypto.subtle.digest('SHA-256', ab);
+                        const hex = Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
+                        if (hex !== rx.fileHash && rx.retries < 1) {
+                            rx.retries++;
+                            rx.done = false; rx.written.clear(); rx.memChunks.clear(); rx.receivedBytes = 0;
+                            rx.lastActivity = Date.now();
+                            if (rx.useOpfs) {
+                                try {
+                                    const w = await rx.fileHandle.createWritable();
+                                    await w.truncate(0); await w.close();
+                                    rx.writable = await rx.fileHandle.createWritable();
+                                } catch (e) {}
+                            }
+                            addSystemMsg(`⚠️ Hash mismatch on <b>${escapeHTML(rx.name)}</b> — requesting retry...`);
+                            v2SendMissing(txId);
+                            return;
+                        }
+                    } catch (e) {}
+                }
+                const node = $(`msg-rx-${txId}`);
+                if (node) node.remove();
+                const url = URL.createObjectURL(blob);
+                renderCompletedFile(url, rx.name, rx.mime, peerNames[rx.senderId] || "Someone", 'theirs');
+                playJoinSound();
+                notifyUser(`Incoming file from ${peerNames[rx.senderId] || "Someone"}`, rx.name);
+                safeFileSend(rx.senderId, { type: 'file-v2-ack', txId, acked: [], complete: true });
+                // Cleanup OPFS copy after materializing blob URL? Keep handle 60s for debugging, then remove.
+                setTimeout(async () => {
+                    try {
+                        if (rx.useOpfs) { const root = await navigator.storage.getDirectory(); await root.removeEntry(txId); } 
+                    } catch (e) {}
+                }, 60000);
+            } catch (e) {
+                console.error('finish rx failed', e);
+                const node = $(`msg-rx-${txId}`);
+                if (node) node.innerHTML = `<div class="msg-info">${peerNames[rx.senderId] || 'Someone'}</div><div style="color: #da373c;">❌ Download failed: ${escapeHTML(e.message || e)}</div>`;
+            } finally {
+                delete FileV2In[txId];
+            }
+        }
+
+        window.toggleRx = (txId) => {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done) return;
+            rx.paused = !rx.paused;
+            const btn = $(`pause-rx-${txId}`);
+            if (btn) btn.innerHTML = rx.paused ? "▶️ Resume" : "⏸️ Pause";
+            safeFileSend(rx.senderId, { type: 'file-v2-control-rx', txId, action: rx.paused ? 'pause' : 'resume' });
+            if (!rx.paused) { rx.lastActivity = Date.now(); v2SendMissing(txId); }
+            v2UpdateRxUI(txId);
         };
+
+        window.cancelRx = async (txId) => {
+            const rx = FileV2In[txId];
+            const senderId = rx ? rx.senderId : null;
+            if (senderId) safeFileSend(senderId, { type: 'file-v2-control-rx', txId, action: 'cancel' });
+            FileV2Tombstones.add(txId);
+            if (rx) {
+                rx.canceled = true;
+                if (rx.missingTimer) { try { clearInterval(rx.missingTimer); } catch (e) {} }
+                if (rx.ackTimer) { try { clearTimeout(rx.ackTimer); } catch (e) {} }
+                try { if (rx.writable) await rx.writable.close(); } catch (e) {}
+                try { if (rx.useOpfs) { const root = await navigator.storage.getDirectory(); await root.removeEntry(txId); } } catch (e) {}
+                delete FileV2In[txId];
+            }
+            const msgNode = $(`msg-rx-${txId}`);
+            if (msgNode) msgNode.innerHTML = `<div class="msg-info">${escapeHTML(peerNames[senderId] || 'Someone')}</div><div style="color: #da373c;">❌ Download Canceled</div>`;
+            setTimeout(() => FileV2Tombstones.delete(txId), 60000);
+        };
+
+        function v2SendHello(sid) {
+            try {
+                const rx = Object.values(FileV2In)
+                    .filter(r => !r.done && !r.canceled)
+                    .map(r => ({ txId: r.txId, haveCount: r.written.size, have: Array.from(r.written).slice(0, 2000), totalChunks: r.totalChunks }));
+                const tx = Object.values(FileV2Out)
+                    .filter(t => !t.canceled && !t.done)
+                    .map(t => t.txId);
+                safeFileSend(sid, { type: 'file-v2-hello', rx, tx });
+            } catch (e) {}
+        }
+
+        function v2OnHello(data, sid) {
+            try {
+                // Peer tells us what they still need -> resume our sends.
+                for (const need of (data.rx || [])) {
+                    const tx = FileV2Out[need.txId];
+                    if (!tx || tx.canceled) continue;
+                    if (!tx.peers[sid]) tx.peers[sid] = { acked: new Set(), inflight: new Map(), resend: [], next: 0, done: false, canceled: false, paused: false, stalled: false, connected: true, failCount: 0, pumping: false };
+                    const ps = tx.peers[sid];
+                    if (ps.done || ps.canceled) continue;
+                    const have = new Set(need.have || []);
+                    for (const h of have) ps.acked.add(h);
+                    // Anything they didn't list (within first 2000) that is beyond? Ask full sweep via pump missing logic.
+                    // Re-announce so receiver refreshes meta, then pump.
+                    safeFileSend(sid, { type: 'file-v2-announce', txId: tx.txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null });
+                    v2Pump(tx.txId, sid);
+                }
+                // Peer tells us what they can still send -> re-request our missing.
+                for (const txId of (data.tx || [])) {
+                    const rx = FileV2In[txId];
+                    if (rx && !rx.done && !rx.canceled) {
+                        rx.senderId = rx.senderId || sid;
+                        rx.stalled = false;
+                        v2SendReady(txId);
+                        v2SendMissing(txId);
+                    }
+                }
+                // Late joiner: we have outbox Tx peer never saw (not in their rx, and they didn't list it). Announce it.
+                for (const txId of Object.keys(FileV2Out)) {
+                    const tx = FileV2Out[txId];
+                    if (!tx || tx.canceled || tx.done) continue;
+                    const peerKnows = (data.rx || []).some(r => r.txId === txId);
+                    if (!peerKnows && !tx.peers[sid]) v2AnnounceTo(sid, txId);
+                }
+            } catch (e) { console.warn('hello handling failed', e); }
+        }
+
+        // Background reaper: revive stalled pumps when peers come back. Never blocks healthy peers.
+        setInterval(() => {
+            try {
+                for (const txId of Object.keys(FileV2Out)) {
+                    const tx = FileV2Out[txId];
+                    if (!tx || tx.canceled || tx.done) continue;
+                    for (const sid of Object.keys(tx.peers)) {
+                        const ps = tx.peers[sid];
+                        if (ps.done || ps.canceled || ps.pumping) continue;
+                        const conn = fileConns[sid];
+                        if (conn && conn.open && (ps.stalled || ps.inflight.size > 0 || ps.acked.size < tx.totalChunks)) v2Pump(txId, sid);
+                    }
+                    // Pick up brand-new peers that connected after enqueue.
+                    for (const sid of Object.keys(fileConns)) {
+                        try {
+                            if (!tx.peers[sid] && fileConns[sid].open) v2AnnounceTo(sid, txId);
+                        } catch (e) {}
+                    }
+                }
+            } catch (e) {}
+        }, 5000);
 
         let currentFx = 0; 
         const fxIcons = ['✨', '🧚', '👻', '🌈'];
@@ -610,172 +1244,135 @@
             }
 
             if (conn.label === 'file') {
-                const setupFile = () => { fileConns[conn.peer] = conn; };
+                const setupFile = () => {
+                    fileConns[conn.peer] = conn;
+                    try {
+                        const dc = conn.dataChannel;
+                        if (dc && typeof dc.bufferedAmountLowThreshold === 'number') dc.bufferedAmountLowThreshold = 256 * 1024;
+                    } catch (e) {}
+                    // Reconnect handshake: exchange incomplete inventories so stalled transfers resume.
+                    try { v2SendHello(conn.peer); } catch (e) {}
+                    // If we have queued outbox files this peer never saw, announce them.
+                    try {
+                        for (const txId of Object.keys(FileV2Out)) {
+                            const tx = FileV2Out[txId];
+                            if (tx && !tx.canceled && !tx.done && !tx.peers[conn.peer]) {
+                                try { v2AnnounceTo(conn.peer, txId); } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                };
                 conn.open ? setupFile() : conn.on('open', setupFile);
-                
-                conn.on('data', data => {
+
+                conn.on('data', async data => {
                     const sid = conn.peer; lastSeen[sid] = Date.now();
-                    
-                    if (data.type === 'file-control') {
-                        const tr = fileTransfers[data.txId];
-                        if (!tr && data.action !== 'cancel') return;
-                        
-                        if (data.action === 'pause') {
-                            const btn = $(`pause-rx-${data.txId}`);
-                            if (btn) { btn.innerHTML = "▶️ Resume"; tr.paused = true; }
-                        } else if (data.action === 'resume') {
-                            const btn = $(`pause-rx-${data.txId}`);
-                            if (btn) { btn.innerHTML = "⏸️ Pause"; tr.paused = false; }
-                        } else if (data.action === 'cancel') {
-                            if (tr) {
-                                (async () => {
-                                    try {
-                                        if (tr.writable) await tr.writable.close();
-                                        const opfsRoot = await navigator.storage.getDirectory();
-                                        await opfsRoot.removeEntry(data.txId);
-                                    } catch(e) {}
-                                })();
-                            }
-                            delete fileTransfers[data.txId];
-                            const msgNode = $(`msg-rx-${data.txId}`);
-                            if (msgNode) msgNode.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
+                    try {
+                        if (!data || typeof data.type !== 'string') return;
+                        // Ignore legacy protocol (we broke it cleanly on purpose).
+                        if (data.type === 'file-meta' || data.type === 'file-chunk' || data.type === 'file-nack' || data.type === 'file-control' || data.type === 'file-control-rx') return;
+
+                        if (data.type === 'file-v2-announce') { v2OnAnnounce(data, sid); }
+                        else if (data.type === 'file-v2-chunk') {
+                            if (FileV2Tombstones.has(data.txId)) return;
+                            v2StoreChunk(data.txId, data.index, data.data);
                         }
-                    }
-                    else if (data.type === 'file-control-rx') {
-                        const tx = activeTransfers.tx[data.txId];
-                        if (tx) {
-                            if (!tx.peerStates) tx.peerStates = {};
-                            tx.peerStates[sid] = (data.action === 'resume') ? 'active' : data.action;
+                        else if (data.type === 'file-v2-ack') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx) return;
+                            const ps = tx.peers[sid];
+                            if (!ps || ps.done || ps.canceled) return;
+                            for (const i of (data.acked || [])) {
+                                try {
+                                    ps.acked.add(i);
+                                    const t = ps.inflight.get(i);
+                                    if (t) { clearTimeout(t); ps.inflight.delete(i); }
+                                    const r = ps.resend.indexOf(i);
+                                    if (r >= 0) ps.resend.splice(r, 1);
+                                } catch (e) {}
+                            }
+                            if (data.complete) { v2MarkPeerDone(data.txId, sid); return; }
+                            if (ps.acked.size >= tx.totalChunks && ps.inflight.size === 0) v2MarkPeerDone(data.txId, sid);
+                            else { ps.stalled = false; v2UpdateSenderUI(data.txId); v2Pump(data.txId, sid); }
                         }
-                    }
-					else if (data.type === 'file-nack') {
-						const tx = activeTransfers.tx[data.txId];
-						if (tx && tx.file && !tx.canceled) {
-							const CHUNK_SIZE = 65536;
-							const offset = data.index * CHUNK_SIZE;
-							readChunkViaWorker(tx.file, offset, CHUNK_SIZE, data.txId, data.index)
-								.then(({ buffer, hash }) => {
-									conn.send({ type: 'file-chunk', txId: data.txId, index: data.index, data: buffer, hash: hash });
-								});
-						}
-					}
-                    else if (data.type === 'file-meta') { 
-                        const txId = data.txId;
-                        
-                        // Disk Streaming Setup (Origin Private File System)
-                        (async () => {
-                            try {
-                                const opfsRoot = await navigator.storage.getDirectory();
-                                const fileHandle = await opfsRoot.getFileHandle(txId, { create: true });
-                                const writable = await fileHandle.createWritable();
-                                
-                                fileTransfers[txId] = { 
-                                    meta: data, 
-                                    received: 0, 
-                                    senderId: sid, 
-                                    paused: false, 
-                                    startTime: Date.now(),
-                                    fileHandle: fileHandle,
-                                    writable: writable,
-                                    writtenChunks: new Set()
-                                }; 
-                                
-                                const progHtml = `
-                                <div>📥 Downloading <b>${data.name}</b> <span id="stats-rx-${txId}" style="font-size:12px; color:#949ba4;">(0%, 0 KB/s)</span></div>
-                                <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
-                                <div style="margin-top: 8px; display: flex; gap: 8px;">
-                                    <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}', '${sid}')">⏸️ Pause</button>
-                                    <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}', '${sid}')">❌ Cancel</button>
-                                </div>`;
-                                addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
-                            } catch (e) {
-                                console.error("Disk initialization failed", e);
+                        else if (data.type === 'file-v2-ready') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx || tx.canceled) return;
+                            if (!tx.peers[sid]) tx.peers[sid] = { acked: new Set(), inflight: new Map(), resend: [], next: 0, done: false, canceled: false, paused: false, stalled: false, connected: true, failCount: 0, pumping: false };
+                            const ps = tx.peers[sid];
+                            if (ps.done || ps.canceled) return;
+                            for (const h of (data.have || [])) ps.acked.add(h);
+                            // Advance next pointer past already-have prefix.
+                            while (ps.next < tx.totalChunks && ps.acked.has(ps.next)) ps.next++;
+                            ps.stalled = false;
+                            v2UpdateSenderUI(data.txId);
+                            v2Pump(data.txId, sid);
+                        }
+                        else if (data.type === 'file-v2-missing') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx || tx.canceled) return;
+                            const ps = tx.peers[sid];
+                            if (!ps || ps.done || ps.canceled) return;
+                            for (const m of (data.missing || []).slice(0, FILE_V2_MAX_CHUNK_MSG)) {
+                                if (typeof m !== 'number' || m < 0 || m >= tx.totalChunks) continue;
+                                if (ps.acked.has(m) || ps.inflight.has(m) || ps.resend.includes(m)) continue;
+                                ps.resend.push(m);
                             }
-                        })();
-                    }
-                    else if (data.type === 'file-chunk') {
-                        const tr = fileTransfers[data.txId]; if(!tr || !tr.writable) return;
-                        
-                        crypto.subtle.digest('SHA-256', data.data).then(async hashBuffer => {
-                            const hashArray = Array.from(new Uint8Array(hashBuffer));
-                            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-                            
-							if (hashHex !== data.hash) {
-								console.warn('SHA-256 checksum failed for chunk ' + data.index + '. Requesting retry...');
-								conn.send({ type: 'file-nack', txId: data.txId, index: data.index });
-								return; 
-							}
-
-                            // SMART RECOVERY
-                            if (tr.lastIndex !== undefined && data.index > tr.lastIndex + 1) {
-                                for (let i = tr.lastIndex + 1; i < data.index; i++) {
-                                    if (!tr.writtenChunks.has(i) && (!tr.nacked || !tr.nacked[i])) {
-                                        tr.nacked = tr.nacked || {};
-                                        tr.nacked[i] = true;
-                                        conn.send({ type: 'file-nack', txId: data.txId, index: i });
-                                    }
-                                }
+                            ps.stalled = false;
+                            v2Pump(data.txId, sid);
+                        }
+                        else if (data.type === 'file-v2-control') {
+                            const rx = FileV2In[data.txId];
+                            if (!rx || rx.done) return;
+                            if (data.action === 'pause') { rx.paused = true; const b = $(`pause-rx-${data.txId}`); if (b) b.innerHTML = "▶️ Resume"; }
+                            else if (data.action === 'resume') { rx.paused = false; rx.lastActivity = Date.now(); const b = $(`pause-rx-${data.txId}`); if (b) b.innerHTML = "⏸️ Pause"; v2SendMissing(data.txId); }
+                            else if (data.action === 'cancel') {
+                                rx.canceled = true;
+                                if (rx.missingTimer) { try { clearInterval(rx.missingTimer); } catch (e) {} }
+                                try { if (rx.writable) await rx.writable.close(); } catch (e) {}
+                                try { const root = await navigator.storage.getDirectory(); await root.removeEntry(data.txId); } catch (e) {}
+                                delete FileV2In[data.txId];
+                                const n = $(`msg-rx-${data.txId}`);
+                                if (n) n.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
                             }
-                            tr.lastIndex = Math.max(tr.lastIndex || 0, data.index);
-
-                            // Directly write chunks to the Hard Drive
-                            if (!tr.writtenChunks.has(data.index)) {
-                                tr.writtenChunks.add(data.index); 
-                                
-                                const CHUNK_SIZE = 65536;
-                                const offset = data.index * CHUNK_SIZE;
-                                await tr.writable.write({ type: 'write', position: offset, data: data.data });
-                                
-                                tr.received += data.data.byteLength;
-                                
-                                const percentValue = Math.min((tr.received / tr.meta.size) * 100, 100);
-                                const bar = $(`bar-rx-${data.txId}`);
-                                if (bar) bar.style.width = `${percentValue}%`;
-                                
-                                const elapsed = (Date.now() - tr.startTime) / 1000;
-                                const speed = elapsed > 0 ? tr.received / elapsed : 0;
-                                const statsEl = $(`stats-rx-${data.txId}`);
-                                if (statsEl) {
-                                    statsEl.innerText = `(${percentValue.toFixed(1)}%, ${formatBytes(speed)}/s)`;
-                                }
-                                
-                                const msgNode = $(`msg-rx-${data.txId}`);
-                                if (msgNode) {
-                                    const info = msgNode.querySelector('.msg-info');
-                                    if (info && info.innerHTML.includes('Reconnecting')) info.innerHTML = peerNames[sid] || "Someone";
-                                }
-
-                                if (tr.received >= tr.meta.size) {
-                                    await tr.writable.close();
-
-                                    const msgNode = $(`msg-rx-${data.txId}`);
-                                    if (msgNode) msgNode.remove();
-
-                                    const file = await tr.fileHandle.getFile();
-                                    const fileWithMime = file.slice(0, file.size, tr.meta.fileType);
-                                    const url = URL.createObjectURL(fileWithMime);
-                                    const senderName = peerNames[sid] || "Someone";
-
-                                    if (tr.meta.fileType.startsWith('image/')) {
-                                        addMessage(`<img src="${url}"><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Image</a>`, senderName, 'theirs');
-                                    } else if (tr.meta.fileType.startsWith('video/')) {
-                                        addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Video</a>`, senderName, 'theirs');
-                                    } else if (tr.meta.fileType.startsWith('audio/')) {
-                                        addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, senderName, 'theirs');
-                                    } else {
-                                        addMessage(`<div>📂 ${tr.meta.name}</div><a href="${url}" download="${tr.meta.name}" class="chat-media-link">${dlIcon} Download File</a>`, senderName, 'theirs');
-                                    }
-
-                                    playJoinSound();
-                                    notifyUser(`Incoming file from ${senderName}`, tr.meta.name);
-                                    delete fileTransfers[data.txId];
-                                }
+                            v2UpdateRxUI(data.txId);
+                        }
+                        else if (data.type === 'file-v2-control-rx') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx) return;
+                            const ps = tx.peers[sid];
+                            if (!ps) return;
+                            if (data.action === 'pause') ps.paused = true;
+                            else if (data.action === 'resume') { ps.paused = false; ps.stalled = false; v2Pump(data.txId, sid); }
+                            else if (data.action === 'cancel') {
+                                ps.canceled = true;
+                                for (const t of ps.inflight.values()) { try { clearTimeout(t); } catch (e) {} }
+                                ps.inflight.clear();
+                                v2MaybeFinishTx(data.txId);
                             }
-                        }).catch(err => console.error("Hash calculation failed", err));
+                            v2UpdateSenderUI(data.txId);
+                        }
+                        else if (data.type === 'file-v2-done') {
+                            const rx = FileV2In[data.txId];
+                            if (rx && !rx.done && !rx.canceled) v2SendMissing(data.txId);
+                        }
+                        else if (data.type === 'file-v2-hello') { v2OnHello(data, sid); }
+                    } catch (e) { console.warn('file-v2 msg failed', e); }
+                });
+                conn.on('close', () => {
+                    delete fileConns[conn.peer];
+                    // Mark sender sessions to this peer as disconnected (they keep state + retry).
+                    for (const txId of Object.keys(FileV2Out)) {
+                        const ps = FileV2Out[txId] && FileV2Out[txId].peers[conn.peer];
+                        if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(txId); }
                     }
                 });
-                conn.on('close', () => delete fileConns[conn.peer]); 
-                conn.on('error', () => delete fileConns[conn.peer]);
+                conn.on('error', () => {
+                    delete fileConns[conn.peer];
+                    for (const txId of Object.keys(FileV2Out)) {
+                        const ps = FileV2Out[txId] && FileV2Out[txId].peers[conn.peer];
+                        if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(txId); }
+                    }
+                });
                 return;
             }
 
@@ -878,16 +1475,20 @@
             
             if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
 
-            // SMARTER WAY: Do not delete the transfer. Just flag it visually. 
-            // It will resume automatically if they reconnect.
-            for (let tid in fileTransfers) {
-                if (fileTransfers[tid].senderId === id) {
+            // Keep file sessions alive across disconnects; they resume via file-v2-hello.
+            for (let tid in FileV2In) {
+                if (FileV2In[tid].senderId === id) {
+                    FileV2In[tid].stalled = true;
                     const msgNode = $(`msg-rx-${tid}`);
                     if (msgNode) {
                         const info = msgNode.querySelector('.msg-info');
-                        if (info) info.innerHTML = `${uname} <span style="color: #f0b232;">(Reconnecting...)</span>`;
+                        if (info) info.innerHTML = `${escapeHTML(uname)} <span style="color: #f0b232;">(Reconnecting...)</span>`;
                     }
                 }
+            }
+            for (let tid in FileV2Out) {
+                const ps = FileV2Out[tid].peers[id];
+                if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(tid); }
             }
 
             ['', '-cam'].forEach(ext => { $(`video-${id}${ext}`)?.remove(); });
@@ -1037,174 +1638,51 @@
             dropOverlay.style.display = 'none';
 
             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                const file = e.dataTransfer.files[0];
-                
-                if (file.type.startsWith('audio/')) {
+                const files = Array.from(e.dataTransfer.files);
+                // Audio dropped = soundboard play (first audio only, legacy behavior); everything else queued.
+                if (files.length === 1 && (files[0].type || '').startsWith('audio/')) {
+                    const file = files[0];
                     if (Object.keys(connections).length === 0) {
                         return addSystemMsg("❌ No one is in the room to hear sounds!");
                     }
-                    addSystemMsg(`Playing <b>${file.name}</b> to the room...`);
+                    addSystemMsg(`Playing <b>${escapeHTML(file.name)}</b> to the room...`);
                     const buffer = await file.arrayBuffer();
                     playCustomSound(buffer, file.type, null);
                     const url = URL.createObjectURL(new Blob([buffer], { type: file.type }));
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${file.name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${escapeHTML(file.name)}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
                     bcast({ type: 'play-sound', buffer: buffer, mime: file.type, name: file.name });
                 } else {
-                    sendFile(file);
+                    // Queue ALL dropped files sequentially (per-peer order preserved, peers independent).
+                    for (const f of files) { try { await v2EnqueueFile(f); } catch (err) { console.warn('enqueue failed', err); } }
+                    if (files.length > 1) addSystemMsg(`📦 Queued <b>${files.length}</b> files...`);
                 }
             }
         });
 
-async function sendFile(file) {
-            if (!file) return;
-            if (Object.keys(connections).length === 0) {
-                return addSystemMsg("❌ No one is in the room to receive files!");
-            }
-            const filename = file.name || `Pasted Media - ${new Date().toLocaleTimeString()}`;
-            const txId = 'tx-' + Date.now() + '-' + Math.floor(Math.random()*1000);
-            
-            // Initialize individual peer states
-            const initialPeerStates = {};
-            for (let sid of Object.keys(fileConns)) {
-                if (fileConns[sid].open) initialPeerStates[sid] = 'active';
-            }
-
-            activeTransfers.tx[txId] = { 
-                paused: false, 
-                canceled: false, 
-                file: file,
-                peerStates: initialPeerStates 
-            };
-
-            bcast({ type: 'file-meta', txId: txId, name: filename, fileType: file.type, size: file.size });
-            
-            const progHtml = `
-            <div>📤 Uploading <b>${filename}</b> <span id="stats-${txId}" style="font-size:12px; color:#949ba4;">(0%, 0 KB/s, 0 peers)</span></div>
-            <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
-            <div style="margin-top: 8px; display: flex; gap: 8px;">
-                <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
-                <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
-            </div>`;
-            addMessage(progHtml, "You", 'mine', `msg-${txId}`);
-
-            let offset = 0;
-            let chunkCount = 0;
-            const CHUNK_SIZE = 65536; 
-            const startTime = Date.now();
-            const MAX_BUFFER = 4 * 1024 * 1024; 
-
-            let nextChunkPromise = readChunkViaWorker(file, offset, CHUNK_SIZE, txId, chunkCount);
-            
-            // Helper to dynamically check how many peers are currently receiving
-            const getActivePeersCount = () => Object.keys(fileConns).filter(sid => 
-                fileConns[sid].open && activeTransfers.tx[txId].peerStates[sid] === 'active'
-            ).length;
-
-            while (offset < file.size) {
-                if (activeTransfers.tx[txId].canceled) return;
-
-                // SMART AUTO-FREEZE: Pauses if globally paused OR if nobody is actively receiving right now
-                while ((activeTransfers.tx[txId].paused && !activeTransfers.tx[txId].canceled) || getActivePeersCount() === 0) {
-                    await new Promise(r => setTimeout(r, 100));
-                    if (activeTransfers.tx[txId].canceled) return;
-                }
-
-                const { buffer, hash } = await nextChunkPromise;
-                
-                const nextOffset = offset + CHUNK_SIZE;
-                if (nextOffset < file.size) {
-                    nextChunkPromise = readChunkViaWorker(file, nextOffset, CHUNK_SIZE, txId, chunkCount + 1);
-                }
-                
-                // Wait if the WebRTC buffer is getting too full (ONLY for active peers)
-                for (let sid of Object.keys(fileConns)) {
-                    const c = fileConns[sid];
-                    if (activeTransfers.tx[txId].peerStates[sid] !== 'active') continue;
-
-                    if (c.open && c.dataChannel) {
-                        let lastBuffered = c.dataChannel.bufferedAmount;
-                        let stagnantTime = 0;
-                        
-                        while (c.open && c.dataChannel.readyState === 'open' && c.dataChannel.bufferedAmount > MAX_BUFFER) { 
-                            await new Promise(r => setTimeout(r, 50)); 
-                            
-                            // STAGNANT BUFFER DETECTION: Drop peers who silently disconnect
-                            if (c.dataChannel.bufferedAmount >= lastBuffered) {
-                                stagnantTime += 50;
-                            } else {
-                                stagnantTime = 0; // Buffer drained slightly, reset the timer
-                            }
-                            lastBuffered = c.dataChannel.bufferedAmount;
-
-                            // If no data has drained for 5 seconds, suspend them
-                            if (stagnantTime > 5000) {
-                                console.warn(`Peer ${peerNames[sid] || sid} has a frozen buffer. Suspending their transfer.`);
-                                activeTransfers.tx[txId].peerStates[sid] = 'stalled';
-                                break;
-                            }
-                        }
-                    }
-                }
-                
-                // Send chunks individually to respect paused/canceled/stalled states
-                for (let sid of Object.keys(fileConns)) {
-                    const c = fileConns[sid];
-                    if (c.open && activeTransfers.tx[txId].peerStates[sid] === 'active') {
-                        c.send({ type: 'file-chunk', txId: txId, index: chunkCount, data: buffer, hash: hash });
-                    }
-                }
-                
-                offset += CHUNK_SIZE;
-                chunkCount++;
-
-                const percentValue = Math.min((offset / file.size) * 100, 100);
-                const bar = $(`bar-${txId}`);
-                if (bar) bar.style.width = `${percentValue}%`;
-
-                if (chunkCount % 50 === 0 || offset >= file.size) {
-                    const elapsed = (Date.now() - startTime) / 1000;
-                    const speed = elapsed > 0 ? offset / elapsed : 0;
-                    const activePeers = getActivePeersCount();
-                    
-                    const statsEl = $(`stats-${txId}`);
-                    if (statsEl) {
-                        statsEl.innerText = `(${percentValue.toFixed(1)}%, ${formatBytes(speed)}/s, ${activePeers} peer${activePeers !== 1 ? 's' : ''})`;
-                    }
-                }
-            }
-            
-            if (!activeTransfers.tx[txId].canceled) {
-                const msgNode = $(`msg-${txId}`);
-                if (msgNode) msgNode.remove();
-
-                const url = URL.createObjectURL(file);
-                if (file.type.startsWith('image/')) {
-                    addMessage(`<img src="${url}"><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Image</a>`, "You", 'mine');
-                } else if (file.type.startsWith('video/')) {
-                    addMessage(`<video src="${url}" controls preload="metadata"></video><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Video</a>`, "You", 'mine');
-                } else if (file.type.startsWith('audio/')) {
-                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
-                } else {
-                    addMessage(`<div>📂 Shared: ${filename}</div><a href="${url}" download="${filename}" class="chat-media-link">${dlIcon} Download File</a>`, "You", 'mine');
-                }
-            }
-
-            setTimeout(() => { if (activeTransfers.tx[txId]) delete activeTransfers.tx[txId]; }, 60000);
+        // Durable sender entry point. Queued sequentially; per-peer sessions are independent
+        // so one stalled peer/file never blocks other peers or later files for healthy peers.
+        async function sendFile(file) { return v2EnqueueFile(file); }
+        async function sendFiles(files) {
+            if (!files || !files.length) return;
+            for (const f of files) { try { await v2EnqueueFile(f); } catch (e) { console.warn('enqueue failed', e); } }
+            if (files.length > 1) addSystemMsg(`📦 Queued <b>${files.length}</b> files...`);
         }
 
         $('file-input').onchange = () => {
-            sendFile($('file-input').files[0]);
+            const files = Array.from($('file-input').files || []);
+            if (files.length) sendFiles(files);
             $('file-input').value = "";
         };
 
         document.addEventListener('paste', (e) => {
             if (e.clipboardData && e.clipboardData.files.length > 0) {
-                const file = e.clipboardData.files[0];
-                if (file.type.startsWith('image/') || file.type.startsWith('video/')) {
-                    const ext = file.type.split('/')[1] || 'bin';
-                    const pastedFile = new File([file], `Pasted Media - ${new Date().toLocaleTimeString()}.${ext}`, { type: file.type });
-                    sendFile(pastedFile);
-                }
+                const files = Array.from(e.clipboardData.files).filter(f => (f.type || '').startsWith('image/') || (f.type || '').startsWith('video/'));
+                if (!files.length) return;
+                const renamed = files.map(file => {
+                    const ext = (file.type.split('/')[1] || 'bin').split(';')[0];
+                    return new File([file], `Pasted Media - ${new Date().toLocaleTimeString()}.${ext}`, { type: file.type });
+                });
+                sendFiles(renamed);
             }
         });
 
