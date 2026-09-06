@@ -355,6 +355,35 @@
         const FileV2In = {};  // txId -> receiver Rx
         const FileV2Order = []; // txIds in enqueue order (per-peer sequential)
         const FileV2Tombstones = new Set();
+        const fileDialPending = new Set();
+
+        // All peers we should send files to = chat peers ∪ file peers (minus self).
+        function v2AllPeerIds() {
+            const s = new Set();
+            try {
+                for (const id of Object.keys(connections)) if (id !== myId) s.add(id);
+                for (const id of Object.keys(fileConns)) if (id !== myId) s.add(id);
+            } catch (e) {}
+            return Array.from(s);
+        }
+
+        // Dial a file-only channel when chat exists but the file channel is missing/dead.
+        // connectToPeer() can't do this (it early-returns when chat exists), hence separate.
+        function ensureFileConn(sid) {
+            if (!sid || sid === myId) return;
+            try {
+                const existing = fileConns[sid];
+                if (existing && existing.open) return;
+            } catch (e) {}
+            if (fileDialPending.has(sid)) return;
+            try { if (!peer || peer.destroyed) return; } catch (e) { return; }
+            fileDialPending.add(sid);
+            setTimeout(() => fileDialPending.delete(sid), 4000);
+            try {
+                const c = peer.connect(sid, { reliable: true, label: 'file' });
+                handleNewConnection(c);
+            } catch (e) { fileDialPending.delete(sid); }
+        }
 
         function v2WindowFor(sid) {
             try {
@@ -442,6 +471,12 @@
                 let extra = `${donePeers}/${total} peers`;
                 if (stalledPeers) extra += `, ${stalledPeers} retrying`;
                 if (tx.paused) extra += `, paused`;
+                // Name the peers we're still waiting on (max 3) so gaps are visible.
+                try {
+                    const pending = peerIds.filter(sid => !tx.peers[sid].done && !tx.peers[sid].canceled)
+                        .map(sid => peerNames[sid] || sid.slice(0, 6));
+                    if (pending.length && donePeers < total) extra += ` — waiting: ${pending.slice(0, 3).join(', ')}${pending.length > 3 ? ` +${pending.length - 3}` : ''}`;
+                } catch (e) {}
                 stats.innerText = `(${pct.toFixed(1)}%, ${extra})`;
             }
             const pauseBtn = $(`pause-${txId}`);
@@ -643,10 +678,14 @@
                 <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
             </div>`;
             addMessage(progHtml, "You", 'mine', `msg-${txId}`);
-            // Announce to each currently-connected peer independently; one failure can't block others.
-            const targets = Object.keys(fileConns).filter(sid => { try { return fileConns[sid].open; } catch (e) { return false; } });
-            if (!targets.length) { addSystemMsg("❌ File channel not ready yet — will retry when peers connect. File queued."); }
-            for (const sid of targets) {
+            // Announce to every peer independently; one failure can't block others.
+            // Targets = chat peers ∪ file peers (file channel may lag behind chat).
+            const targets = v2AllPeerIds();
+            const ready = targets.filter(sid => { try { return fileConns[sid] && fileConns[sid].open; } catch (e) { return false; } });
+            const missing = targets.filter(sid => ready.indexOf(sid) < 0);
+            for (const sid of missing) { try { ensureFileConn(sid); } catch (e) {} }
+            if (!ready.length) { addSystemMsg("❌ File channel not ready yet — will retry when peers connect. File queued."); }
+            for (const sid of ready) {
                 try { v2AnnounceTo(sid, txId); } catch (e) { console.warn('announce failed for', sid, e); }
             }
             v2UpdateSenderUI(txId);
@@ -676,9 +715,13 @@
         window.retryTx = (txId) => {
             const tx = FileV2Out[txId];
             if (!tx || tx.done) return;
-            for (const sid of Object.keys(fileConns)) {
+            // Retry across ALL known peers (chat ∪ file), establishing missing file channels.
+            for (const sid of v2AllPeerIds()) {
+                try {
+                    if (!fileConns[sid] || !fileConns[sid].open) ensureFileConn(sid);
+                } catch (e) {}
                 if (!tx.peers[sid]) {
-                    try { v2AnnounceTo(sid, txId); } catch (e) {}
+                    try { if (fileConns[sid] && fileConns[sid].open) v2AnnounceTo(sid, txId); } catch (e) {}
                     continue;
                 }
                 const ps = tx.peers[sid];
@@ -686,10 +729,6 @@
                 ps.stalled = false; ps.failCount = 0; ps.paused = false;
                 try { safeFileSend(sid, { type: 'file-v2-announce', txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null }); } catch (e) {}
                 v2Pump(txId, sid);
-            }
-            // Also pick up brand-new peers that connected after enqueue.
-            for (const sid of Object.keys(fileConns)) {
-                try { if (!tx.peers[sid] && fileConns[sid].open) v2AnnounceTo(sid, txId); } catch (e) {}
             }
             v2UpdateSenderUI(txId);
             addSystemMsg(`🔁 Retrying stalled peers for <b>${escapeHTML(tx.name)}</b>...`);
@@ -769,8 +808,9 @@
             if (!txId || FileV2Tombstones.has(txId)) return;
             let rx = FileV2In[txId];
             if (rx) {
-                // Duplicate announce (retry / reconnect): re-sync without wiping progress.
-                rx.senderId = rx.senderId || sid;
+                // Duplicate announce (retry / reconnect / rejoined with new id):
+                // re-sync without wiping progress; latest announcer gets the ACKs.
+                rx.senderId = sid;
                 v2SendReady(txId);
                 v2UpdateRxUI(txId);
                 return;
@@ -1021,7 +1061,7 @@
                 for (const txId of (data.tx || [])) {
                     const rx = FileV2In[txId];
                     if (rx && !rx.done && !rx.canceled) {
-                        rx.senderId = rx.senderId || sid;
+                        rx.senderId = sid;
                         rx.stalled = false;
                         v2SendReady(txId);
                         v2SendMissing(txId);
@@ -1040,6 +1080,12 @@
         // Background reaper: revive stalled pumps when peers come back. Never blocks healthy peers.
         setInterval(() => {
             try {
+                // Heal missing file channels first (chat up, file down -> redial).
+                try {
+                    for (const sid of v2AllPeerIds()) {
+                        if ((!fileConns[sid] || !fileConns[sid].open) && connections[sid] && connections[sid].open) ensureFileConn(sid);
+                    }
+                } catch (e) {}
                 for (const txId of Object.keys(FileV2Out)) {
                     const tx = FileV2Out[txId];
                     if (!tx || tx.canceled || tx.done) continue;
@@ -1050,9 +1096,9 @@
                         if (conn && conn.open && (ps.stalled || ps.inflight.size > 0 || ps.acked.size < tx.totalChunks)) v2Pump(txId, sid);
                     }
                     // Pick up brand-new peers that connected after enqueue.
-                    for (const sid of Object.keys(fileConns)) {
+                    for (const sid of v2AllPeerIds()) {
                         try {
-                            if (!tx.peers[sid] && fileConns[sid].open) v2AnnounceTo(sid, txId);
+                            if (!tx.peers[sid] && fileConns[sid] && fileConns[sid].open) v2AnnounceTo(sid, txId);
                         } catch (e) {}
                     }
                 }
@@ -1245,6 +1291,14 @@
 
             if (conn.label === 'file') {
                 const setupFile = () => {
+                    // Mesh dials both directions -> duplicate pairs are normal. Keep the first
+                    // working channel, close newcomers. Without this, duplicates overwrite
+                    // fileConns[] and the loser's on('close') deletes the winner's entry,
+                    // which is why only one peer would receive files.
+                    try {
+                        const prev = fileConns[conn.peer];
+                        if (prev && prev !== conn && prev.open) { try { conn.close(); } catch (e) {} return; }
+                    } catch (e) {}
                     fileConns[conn.peer] = conn;
                     try {
                         const dc = conn.dataChannel;
@@ -1359,24 +1413,37 @@
                     } catch (e) { console.warn('file-v2 msg failed', e); }
                 });
                 conn.on('close', () => {
+                    if (fileConns[conn.peer] !== conn) return; // stale duplicate, ignore
                     delete fileConns[conn.peer];
                     // Mark sender sessions to this peer as disconnected (they keep state + retry).
                     for (const txId of Object.keys(FileV2Out)) {
                         const ps = FileV2Out[txId] && FileV2Out[txId].peers[conn.peer];
                         if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(txId); }
                     }
+                    // If chat is still alive, the file channel died half-way -> redial it.
+                    try {
+                        if (connections[conn.peer] && connections[conn.peer].open) setTimeout(() => ensureFileConn(conn.peer), 1500);
+                    } catch (e) {}
                 });
                 conn.on('error', () => {
+                    if (fileConns[conn.peer] !== conn) return; // stale duplicate, ignore
                     delete fileConns[conn.peer];
                     for (const txId of Object.keys(FileV2Out)) {
                         const ps = FileV2Out[txId] && FileV2Out[txId].peers[conn.peer];
                         if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(txId); }
                     }
+                    try {
+                        if (connections[conn.peer] && connections[conn.peer].open) setTimeout(() => ensureFileConn(conn.peer), 1500);
+                    } catch (e) {}
                 });
                 return;
             }
 
             const setup = () => {
+                try {
+                    const prev = connections[conn.peer];
+                    if (prev && prev !== conn && prev.open) { try { conn.close(); } catch (e) {} return; }
+                } catch (e) {}
                 pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
                 $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
                 $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
@@ -1430,7 +1497,8 @@
                     addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
                 }
             });
-            conn.on('close', () => removePeer(conn.peer)); conn.on('error', () => removePeer(conn.peer));
+            conn.on('close', () => { if (connections[conn.peer] !== conn) return; removePeer(conn.peer); });
+            conn.on('error', () => { if (connections[conn.peer] !== conn) return; removePeer(conn.peer); });
         }
 
         function handleNewCall(call) {
@@ -1496,7 +1564,12 @@
             if (camCalls[id]) { camCalls[id].close(); delete camCalls[id]; }
             $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
             
-            delete connections[id]; delete fileConns[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
+            delete connections[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
+            // Only drop the file channel entry if it isn't a live channel (chat close != file close).
+            try {
+                const fc = fileConns[id];
+                if (fc && !fc.open) delete fileConns[id];
+            } catch (e) { try { delete fileConns[id]; } catch (e2) {} }
             
             if (!Object.keys(connections).length) { 
                 $('searching-container').style.display = 'flex'; 
