@@ -258,6 +258,15 @@
             return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
         }
 
+        function fmtETA(sec) {
+            if (!isFinite(sec) || sec < 0) return '—';
+            sec = Math.round(sec);
+            if (sec < 60) return sec + 's';
+            const m = Math.floor(sec / 60);
+            if (m < 60) return m + ':' + String(sec % 60).padStart(2, '0');
+            return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+        }
+
         // --- Screen Wake Lock API ---
         let wakeLock = null;
         const requestWakeLock = async () => {
@@ -327,12 +336,19 @@
         }
 
         // === FileV2: durable transfer constants ===
-        // 32KB chunks: 2 SCTP packets each, far fewer messages/ACKs than 16KB.
-        // Integrity: per-chunk CRC32 (cheap, sync) + whole-file SHA-256 (background).
-        const FILE_V2_CHUNK = 32768;
-        const FILE_V2_WINDOW = 16; // 16 x 32KB = 512KB max in flight per peer
+        // 64KB chunks halve message/ACK overhead vs 32KB. Per-chunk CRC32 + timeout
+        // resend cover the coarser retransmit granularity.
+        // Bandwidth control is TCP-style per peer: slow-start, additive growth while
+        // clean, instant halve on loss. Static ceilings never adapt to the link.
+        const FILE_V2_CHUNK = 65536;
         const FILE_V2_ACK_TIMEOUT = 1500;
         const FILE_V2_MAX_CHUNK_MSG = 120; // cap missing-list per control msg
+        const F2_CWND_START = 262144;   // 256KB slow-start (never 0: always trickles)
+        const F2_CWND_MIN = 131072;     // 128KB floor under turbulence
+        const F2_CWND_MAX = 4194304;    // 4MB ceiling on clean fast links
+        const F2_CWND_SSTHRESH = 1048576; // below 1MB: double per window; above: +1/window
+        const F2_CAP_MIN = 262144;      // backpressure floor (always enforced)
+        const F2_CAP_MAX = 2097152;     // backpressure ceiling
         const F2_CHUNK_CACHE = 96; // shared slice cache entries (~3MB at 32KB)
         const makeTxId = () => 'v2-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -425,23 +441,71 @@
             } catch (e) { fileDialPending.delete(sid); }
         }
 
-        // Writability checks BOTH layers: PeerJS's internal JS queue (c.bufferSize,
-        // present in v1.4+) AND the raw SCTP channel. The old code only watched the
-        // raw channel, which stays near-empty while PeerJS queues megabytes internally
-        // after re-chunking 64KB messages -> flooding, stalls, and lost chunks.
+        // ---- F2 congestion control (TCP-style, per peer) ----
+        // cwnd = bytes allowed in flight. Slow-start below SSTHRESH, +1 chunk per
+        // clean window above it, halve on any loss signal, hard floor so it always
+        // trickles (never deadlocks), hard ceiling so it can't flood.
+        function f2CwndChunks(ps) {
+            try {
+                const c = Math.floor((ps.cwndBytes || F2_CWND_START) / FILE_V2_CHUNK);
+                return Math.min(Math.max(c, 2), 64);
+            } catch (e) { return 8; }
+        }
+        function f2CapFor(sid) {
+            let mx = 0;
+            try {
+                for (const txId of Object.keys(FileV2Out)) {
+                    const tx = FileV2Out[txId];
+                    const ps = tx && tx.peers[sid];
+                    if (ps && !ps.done && !ps.canceled && (ps.cwndBytes || 0) > mx) mx = ps.cwndBytes;
+                }
+            } catch (e) {}
+            if (!mx) mx = F2_CWND_START;
+            return Math.min(Math.max(2 * mx, F2_CAP_MIN), F2_CAP_MAX);
+        }
+        function f2ClearTimer(v) {
+            try {
+                const t = v && typeof v === 'object' ? v.timer : v;
+                if (t) clearTimeout(t);
+            } catch (e) {}
+        }
+        function f2Grow(ps, rttSample) {
+            try {
+                if (!ps || ps.done || ps.canceled) return;
+                if (typeof rttSample === 'number' && rttSample > 0) {
+                    ps.srtt = ps.srtt ? (ps.srtt * 0.875 + rttSample * 0.125) : rttSample;
+                }
+                // Hold growth briefly after turbulence so recovery completes first.
+                if (Date.now() - (ps.lastBackoff || 0) < 3000) return;
+                const win = Math.max(f2CwndChunks(ps), 1);
+                const step = ((ps.cwndBytes || F2_CWND_START) < F2_CWND_SSTHRESH) ? FILE_V2_CHUNK : (FILE_V2_CHUNK / win);
+                ps.cwndBytes = Math.min(((ps.cwndBytes || F2_CWND_START) + step), F2_CWND_MAX);
+            } catch (e) {}
+        }
+        function f2Shrink(ps) {
+            try {
+                if (!ps) return;
+                ps.cwndBytes = Math.max(Math.floor((ps.cwndBytes || F2_CWND_START) / 2), F2_CWND_MIN);
+                ps.lastBackoff = Date.now();
+            } catch (e) {}
+        }
+        // Writability checks BOTH layers (PeerJS internal queue + raw SCTP channel)
+        // against the ADAPTIVE cap for this peer: 2x its congestion window,
+        // bounded [256KB, 2MB]. Backpressure always exists; it just breathes.
         function f2Writable(sid) {
+            const cap = f2CapFor(sid);
             try {
                 const c = fileConns[sid];
                 if (!c || !c.open) return false;
                 try {
                     const bs = c.bufferSize;
-                    if (typeof bs === 'number' && bs > 512 * 1024) return false;
+                    if (typeof bs === 'number' && bs > cap) return false;
                 } catch (e) {}
                 try {
                     const dc = c.dataChannel;
                     if (dc) {
                         if (dc.readyState && dc.readyState !== 'open') return false;
-                        if (typeof dc.bufferedAmount === 'number' && dc.bufferedAmount > 512 * 1024) return false;
+                        if (typeof dc.bufferedAmount === 'number' && dc.bufferedAmount > cap) return false;
                     }
                 } catch (e) {}
                 return true;
@@ -493,7 +557,7 @@
             if (!sessions.length) return;
             f2RoundRobin = f2RoundRobin % sessions.length;
             let sent = 0;
-            const MAX_PER_TICK = 12;
+            const MAX_PER_TICK = 24;
             for (let n = 0; n < sessions.length && sent < MAX_PER_TICK; n++) {
                 const pair = sessions[(f2RoundRobin + n) % sessions.length];
                 const tx = pair[0], sid = pair[1];
@@ -507,7 +571,7 @@
                 }
                 ps.connected = true;
                 if (now < (ps.backoffUntil || 0)) continue;
-                if (ps.inflight.size >= FILE_V2_WINDOW) continue; // ACK-clocked
+                if (ps.inflight.size >= f2CwndChunks(ps)) continue; // ACK-clocked, adaptive
                 if (!f2Writable(sid)) continue; // backpressure: try next session
                 let idx = f2PickNext(tx, ps);
                 if (idx === null) {
@@ -515,14 +579,14 @@
                         if (ps.acked.size >= tx.totalChunks) { v2MarkPeerDone(tx.txId, sid); continue; }
                         const missing = v2MissingFor(tx.txId, sid);
                         if (missing.length) {
-                            for (const m of missing.slice(0, FILE_V2_WINDOW)) if (!ps.resend.includes(m)) ps.resend.push(m);
+                            for (const m of missing.slice(0, f2CwndChunks(ps))) if (!ps.resend.includes(m)) ps.resend.push(m);
                             idx = f2PickNext(tx, ps);
                             if (idx === null) continue;
                         } else continue; // waiting on receiver sweep / late ACKs
                     } else continue;
                 }
                 // Reserve the window slot synchronously (schedule loop is sync).
-                ps.inflight.set(idx, 0);
+                ps.inflight.set(idx, { timer: 0, sentAt: now });
                 sent++;
                 f2Transmit(tx.txId, sid, idx);
             }
@@ -553,42 +617,63 @@
             return out;
         }
 
-        function v2UpdateSenderUI(txId) {
+        function v2UpdateSenderUI(txId, force) {
             const tx = FileV2Out[txId];
             if (!tx) return;
             const now = Date.now();
-            if (now - (tx.uiThrottle || 0) < 250) return;
+            // Button state must flip instantly on click — never throttle this.
+            // (Stats below update at most 4x/sec; during active transfer the
+            // throttle window is always fresh and would swallow the flip.)
+            try {
+                const pauseBtn = $(`pause-${txId}`);
+                if (pauseBtn && !tx.done) pauseBtn.innerHTML = tx.paused ? "▶️ Resume" : "⏸️ Pause";
+            } catch (e) {}
+            if (!force && now - (tx.uiThrottle || 0) < 250) return;
             tx.uiThrottle = now;
-            const peerIds = Object.keys(tx.peers);
-            let donePeers = 0, stalledPeers = 0, ackedMax = 0, ackedMin = tx.totalChunks;
-            for (const sid of peerIds) {
+            // Active set excludes canceled peers: a cancel immediately shrinks both
+            // numerator and denominator, so % jumps up and the name drops off.
+            const activeIds = Object.keys(tx.peers).filter(sid => !tx.peers[sid].canceled);
+            let donePeers = 0, stalledPeers = 0, ackedTotal = 0;
+            for (const sid of activeIds) {
                 const ps = tx.peers[sid];
-                const n = ps.acked.size;
-                ackedMax = Math.max(ackedMax, n);
-                ackedMin = Math.min(ackedMin, n);
+                ackedTotal += Math.min(ps.acked.size, tx.totalChunks);
                 if (ps.done) donePeers++;
                 else if (ps.stalled || !ps.connected) stalledPeers++;
             }
-            const denom = Math.max(tx.totalChunks, 1);
-            const pct = Math.min((ackedMax / denom) * 100, 100);
+            const denom = Math.max(tx.totalChunks * activeIds.length, 1);
+            const pct = Math.min((ackedTotal / denom) * 100, 100);
             const bar = $(`bar-${txId}`);
             if (bar) bar.style.width = `${pct}%`;
             const stats = $(`stats-${txId}`);
             if (stats) {
-                const total = peerIds.length;
-                let extra = `${donePeers}/${total} peers`;
+                const total = activeIds.length;
+                // Live throughput: bytes newly ACKed in the trailing window.
+                // Decays to 0 on its own when paused/stalled; never freezes stale.
+                let speed = 0;
+                try {
+                    const log = tx.rateLog || (tx.rateLog = []);
+                    while (log.length && now - log[0].t > 3000) log.shift();
+                    let wsum = 0;
+                    for (const e of log) wsum += e.bytes;
+                    const span = log.length ? Math.min((now - log[0].t) / 1000, 3) : 0;
+                    speed = span > 0.2 ? wsum / span : 0;
+                } catch (e) { speed = 0; }
+                const remainingChunks = Math.max(denom - ackedTotal, 0);
+                const eta = speed > 0 ? (remainingChunks * FILE_V2_CHUNK) / speed : Infinity;
+                let extra = `${donePeers}/${total} peers, ${formatBytes(speed)}/s, ETA ${fmtETA(eta)}`;
                 if (stalledPeers) extra += `, ${stalledPeers} retrying`;
                 if (tx.paused) extra += `, paused`;
-                // Name the peers we're still waiting on (max 3) so gaps are visible.
+                // Name who we're still waiting on, with each peer's own % (max 3).
                 try {
-                    const pending = peerIds.filter(sid => !tx.peers[sid].done && !tx.peers[sid].canceled)
-                        .map(sid => peerNames[sid] || sid.slice(0, 6));
+                    const pending = activeIds.filter(sid => !tx.peers[sid].done)
+                        .map(sid => {
+                            const p = tx.totalChunks ? Math.min((tx.peers[sid].acked.size / tx.totalChunks) * 100, 100) : 100;
+                            return `${peerNames[sid] || sid.slice(0, 6)} (${p.toFixed(0)}%)`;
+                        });
                     if (pending.length && donePeers < total) extra += ` — waiting: ${pending.slice(0, 3).join(', ')}${pending.length > 3 ? ` +${pending.length - 3}` : ''}`;
                 } catch (e) {}
                 stats.innerText = `(${pct.toFixed(1)}%, ${extra})`;
             }
-            const pauseBtn = $(`pause-${txId}`);
-            if (pauseBtn && !tx.done) pauseBtn.innerHTML = tx.paused ? "▶️ Resume" : "⏸️ Pause";
         }
 
         function v2MarkPeerDone(txId, sid) {
@@ -596,13 +681,13 @@
             if (!tx) return;
             const ps = tx.peers[sid];
             if (!ps || ps.done) return;
-            for (const t of ps.inflight.values()) { try { clearTimeout(t); } catch (e) {} }
+            for (const t of ps.inflight.values()) { f2ClearTimer(t); }
             ps.inflight.clear();
             ps.resend.length = 0;
             ps.done = true;
             ps.stalled = false;
             safeFileSend(sid, { type: 'file-v2-done', txId });
-            v2UpdateSenderUI(txId);
+            v2UpdateSenderUI(txId, true);
             f2Kick(); // scheduler picks up next queued file for this peer (order kept)
             v2MaybeFinishTx(txId);
         }
@@ -674,8 +759,8 @@
                 ps.failCount = 0;
                 ps.backoffUntil = 0;
                 if (ps.stalled && ps.inflight.size <= 2 && ps.resend.length === 0) { ps.stalled = false; v2UpdateSenderUI(txId); }
-                try { clearTimeout(ps.inflight.get(index)); } catch (e) {}
-                ps.inflight.set(index, setTimeout(() => {
+                f2ClearTimer(ps.inflight.get(index));
+                ps.inflight.set(index, { timer: setTimeout(() => {
                     try {
                         const t2 = FileV2Out[txId];
                         const p2 = t2 && t2.peers[sid];
@@ -683,13 +768,14 @@
                         p2.inflight.delete(index);
                         if (!p2.acked.has(index)) {
                             if (!p2.resend.includes(index)) p2.resend.push(index);
+                            f2Shrink(p2); // loss signal: halve window instantly, floor holds
                             v2UpdateSenderUI(txId);
                             f2Kick();
                         }
                     } catch (e) {}
-                }, FILE_V2_ACK_TIMEOUT));
+                }, FILE_V2_ACK_TIMEOUT), sentAt: Date.now() });
             } catch (e) {
-                try { clearTimeout(ps.inflight.get(index)); } catch (e2) {}
+                f2ClearTimer(ps.inflight.get(index));
                 try { ps.inflight.delete(index); } catch (e2) {}
                 if (!ps.acked.has(index) && !ps.resend.includes(index)) {
                     try { ps.resend.unshift(index); } catch (e2) {}
@@ -702,7 +788,7 @@
         }
 
         function v2NewPeerState() {
-            return { acked: new Set(), inflight: new Map(), resend: [], next: 0, done: false, canceled: false, paused: false, stalled: false, connected: true, failCount: 0, backoffUntil: 0, lastAck: Date.now(), lastAnnounce: 0, gotReady: false };
+            return { acked: new Set(), inflight: new Map(), resend: [], next: 0, done: false, canceled: false, paused: false, stalled: false, connected: true, failCount: 0, backoffUntil: 0, lastAck: Date.now(), lastAnnounce: 0, gotReady: false, cwndBytes: F2_CWND_START, srtt: 0, lastBackoff: 0 };
         }
 
         function v2AnnounceTo(sid, txId) {
@@ -725,7 +811,8 @@
                 txId, file, name: file.name || (`Pasted Media - ${new Date().toLocaleTimeString()}`),
                 mime: file.type || 'application/octet-stream', size: file.size, totalChunks,
                 fileHash: null, hashReady: false, createdAt: Date.now(),
-                paused: false, canceled: false, done: false, peers: {}, startTime: Date.now(), uiThrottle: 0
+                paused: false, canceled: false, done: false, peers: {}, startTime: Date.now(), uiThrottle: 0,
+                rateLog: [] // {t, bytes} of freshly ACKed chunks, trailing 3s -> live MB/s
             };
             FileV2Out[txId] = tx;
             FileV2Order.push(txId);
@@ -785,7 +872,7 @@
             for (const sid of Object.keys(tx.peers)) {
                 const ps = tx.peers[sid];
                 ps.canceled = true;
-                for (const t of ps.inflight.values()) { try { clearTimeout(t); } catch (e) {} }
+                for (const t of ps.inflight.values()) { f2ClearTimer(t); }
                 ps.inflight.clear();
                 safeFileSend(sid, { type: 'file-v2-control', txId, action: 'cancel' });
             }
@@ -808,8 +895,10 @@
             const stats = $(`stats-rx-${txId}`);
             if (stats) {
                 const elapsed = (Date.now() - rx.startTime) / 1000;
-                const speed = elapsed > 0 ? rx.receivedBytes / elapsed : 0;
-                let extra = `${pct.toFixed(1)}%, ${formatBytes(speed)}/s`;
+                const speed = elapsed > 0.5 ? rx.receivedBytes / elapsed : 0;
+                const remaining = Math.max(rx.size - rx.receivedBytes, 0);
+                const eta = speed > 0 ? remaining / speed : Infinity;
+                let extra = `${pct.toFixed(1)}%, ${formatBytes(speed)}/s, ETA ${fmtETA(eta)}`;
                 if (rx.paused) extra += `, paused`;
                 if (rx.stalled) extra += `, waiting for sender…`;
                 stats.innerText = `(${extra})`;
@@ -824,10 +913,10 @@
                     rx.ackTimer = null;
                     if (!rx || rx.canceled || rx.done) return;
                     if (!rx.ackPending.length) return;
-                    const batch = rx.ackPending.splice(0, 50);
+                    const batch = rx.ackPending.splice(0, 100);
                     safeFileSend(rx.senderId, { type: 'file-v2-ack', txId, acked: batch });
                 } catch (e) {}
-            }, 150);
+            }, 100);
         }
 
         function v2SendReady(txId) {
@@ -1433,11 +1522,19 @@
                             if (!ps || ps.done || ps.canceled) return;
                             for (const i of (data.acked || [])) {
                                 try {
+                                    const isNew = !ps.acked.has(i);
+                                    const rec = ps.inflight.get(i);
+                                    const sentAt = rec && typeof rec === 'object' ? rec.sentAt : 0;
+                                    f2ClearTimer(rec);
+                                    ps.inflight.delete(i);
+                                    if (isNew) {
+                                        // Genuinely new confirmation (not a dup/resend ACK):
+                                        // feeds the live MB/s window AND grows the congestion window.
+                                        try { tx.rateLog.push({ t: Date.now(), bytes: FILE_V2_CHUNK }); } catch (e) {}
+                                        f2Grow(ps, sentAt ? (Date.now() - sentAt) : 0);
+                                    }
                                     ps.acked.add(i);
                                     ps.lastAck = Date.now();
-                                    const t = ps.inflight.get(i);
-                                    if (t) { clearTimeout(t); ps.inflight.delete(i); }
-                                    else ps.inflight.delete(i);
                                     const r = ps.resend.indexOf(i);
                                     if (r >= 0) ps.resend.splice(r, 1);
                                 } catch (e) {}
@@ -1500,9 +1597,11 @@
                             else if (data.action === 'resume') { ps.paused = false; ps.stalled = false; ps.backoffUntil = 0; f2Kick(); }
                             else if (data.action === 'cancel') {
                                 ps.canceled = true;
-                                for (const t of ps.inflight.values()) { try { clearTimeout(t); } catch (e) {} }
+                                for (const t of ps.inflight.values()) { f2ClearTimer(t); }
                                 ps.inflight.clear();
                                 v2MaybeFinishTx(data.txId);
+                                // Canceled peer leaves numerator + denominator NOW, not next tick.
+                                v2UpdateSenderUI(data.txId, true);
                             }
                             v2UpdateSenderUI(data.txId);
                         }
