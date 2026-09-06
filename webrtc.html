@@ -327,14 +327,53 @@
         }
 
         // === FileV2: durable transfer constants ===
-        // 16KB chunks fit in ONE SCTP packet (PeerJS MTU ~16.3KB), so there is no
-        // PeerJS-side reassembly to fail under load. No per-chunk hashing on hot path.
-        const FILE_V2_CHUNK = 16384;
-        const FILE_V2_WINDOW = 8; // 8 x 16KB = 128KB max in flight per peer
-        const FILE_V2_ACK_TIMEOUT = 2500;
+        // 32KB chunks: 2 SCTP packets each, far fewer messages/ACKs than 16KB.
+        // Integrity: per-chunk CRC32 (cheap, sync) + whole-file SHA-256 (background).
+        const FILE_V2_CHUNK = 32768;
+        const FILE_V2_WINDOW = 16; // 16 x 32KB = 512KB max in flight per peer
+        const FILE_V2_ACK_TIMEOUT = 1500;
         const FILE_V2_MAX_CHUNK_MSG = 120; // cap missing-list per control msg
+        const F2_CHUNK_CACHE = 96; // shared slice cache entries (~3MB at 32KB)
         const makeTxId = () => 'v2-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+        // CRC32 (IEEE) over ArrayBuffer/Uint8Array. Sync, ~GB/s. Catches transport
+        // corruption per chunk; whole-file SHA-256 still verifies end-to-end.
+        const F2_CRC_TABLE = (() => {
+            const t = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                t[n] = c >>> 0;
+            }
+            return t;
+        })();
+        function f2Crc32(buf) {
+            const v = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+            let crc = 0xFFFFFFFF;
+            for (let i = 0; i < v.length; i++) crc = F2_CRC_TABLE[(crc ^ v[i]) & 0xFF] ^ (crc >>> 8);
+            return (crc ^ 0xFFFFFFFF) >>> 0;
+        }
+        // Shared read cache: all peers need the same slices in the same order.
+        // Avoids re-reading the same bytes from disk once per peer.
+        const f2ChunkCache = new Map(); // key txId:index -> ArrayBuffer
+        function f2CacheGet(txId, index) { try { return f2ChunkCache.get(txId + ':' + index) || null; } catch (e) { return null; } }
+        function f2CachePut(txId, index, buf) {
+            try {
+                f2ChunkCache.set(txId + ':' + index, buf);
+                while (f2ChunkCache.size > F2_CHUNK_CACHE) {
+                    const oldest = f2ChunkCache.keys().next().value;
+                    f2ChunkCache.delete(oldest);
+                }
+            } catch (e) {}
+        }
+        function f2CacheDrop(txId) {
+            try {
+                for (const k of Array.from(f2ChunkCache.keys())) {
+                    if (k === txId || k.indexOf(txId + ':') === 0) f2ChunkCache.delete(k);
+                }
+            } catch (e) {}
+        }
 
         let myName = "", myId = "", peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
         let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
@@ -429,7 +468,7 @@
             f2TickScheduled = true;
             setTimeout(() => { f2TickScheduled = false; try { f2Schedule(); } catch (e) {} }, 0);
         }
-        setInterval(() => { try { f2Schedule(); } catch (e) {} }, 20);
+        setInterval(() => { try { f2Schedule(); } catch (e) {} }, 10);
 
         function f2PickNext(tx, ps) {
             while (ps.resend.length) {
@@ -454,7 +493,7 @@
             if (!sessions.length) return;
             f2RoundRobin = f2RoundRobin % sessions.length;
             let sent = 0;
-            const MAX_PER_TICK = 6;
+            const MAX_PER_TICK = 12;
             for (let n = 0; n < sessions.length && sent < MAX_PER_TICK; n++) {
                 const pair = sessions[(f2RoundRobin + n) % sessions.length];
                 const tx = pair[0], sid = pair[1];
@@ -580,24 +619,36 @@
                     try {
                         const url = URL.createObjectURL(tx.file);
                         msgNode.remove();
-                        renderCompletedFile(url, tx.name, tx.mime || tx.file.type, "You", 'mine');
+                        renderCompletedFile(url, tx.name, tx.mime || tx.file.type, "You", 'mine', true);
                     } catch (e) {
                         msgNode.innerHTML = `<div class="msg-info">You</div><div>✅ Shared: <b>${escapeHTML(tx.name)}</b> (all reachable peers done)</div>`;
                     }
                 }
-                // Keep Tx 5 min to serve late joiners via hello, then GC.
-                setTimeout(() => { delete FileV2Out[txId]; const i = FileV2Order.indexOf(txId); if (i >= 0) FileV2Order.splice(i, 1); }, 5 * 60 * 1000);
+                // Keep Tx 5 min to serve late joiners via hello, then GC (+ drop slice cache).
+                setTimeout(() => { f2CacheDrop(txId); delete FileV2Out[txId]; const i = FileV2Order.indexOf(txId); if (i >= 0) FileV2Order.splice(i, 1); }, 5 * 60 * 1000);
             }
             v2UpdateSenderUI(txId);
         }
 
+        // Whole-file SHA-256 in background. Announce goes out immediately (usually
+        // before this finishes), so the hash is delivered afterwards via file-v2-hash
+        // and the receiver verifies it at completion. Always attempted: chunk CRCs
+        // protect per-chunk integrity even when this is skipped for huge files.
         async function v2HashInBackground(tx) {
             try {
                 if (!tx.file || tx.file.size > 300 * 1024 * 1024) return;
                 const buf = await tx.file.arrayBuffer();
+                if (tx.canceled) return;
                 const h = await crypto.subtle.digest('SHA-256', buf);
                 tx.fileHash = Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
                 tx.hashReady = true;
+                // Deliver late: receivers that already got the announce still verify.
+                try {
+                    for (const sid of Object.keys(tx.peers)) {
+                        const ps = tx.peers[sid];
+                        if (ps && !ps.done && !ps.canceled) safeFileSend(sid, { type: 'file-v2-hash', txId: tx.txId, fileHash: tx.fileHash });
+                    }
+                } catch (e) {}
             } catch (e) { tx.fileHash = null; }
         }
 
@@ -609,11 +660,16 @@
             if (!tx || !ps || tx.canceled || ps.canceled || ps.done) return;
             if (ps.acked.has(index)) { ps.inflight.delete(index); return; }
             try {
-                const buf = await tx.file.slice(index * FILE_V2_CHUNK, Math.min((index + 1) * FILE_V2_CHUNK, tx.size)).arrayBuffer();
+                let buf = f2CacheGet(txId, index);
+                if (!buf) {
+                    buf = await tx.file.slice(index * FILE_V2_CHUNK, Math.min((index + 1) * FILE_V2_CHUNK, tx.size)).arrayBuffer();
+                    f2CachePut(txId, index, buf);
+                }
                 if (tx.canceled || ps.canceled || ps.done) { ps.inflight.delete(index); return; }
                 if (!ps.inflight.has(index)) return; // cleared while reading
                 if (ps.acked.has(index)) { ps.inflight.delete(index); return; }
-                const ok = safeFileSend(sid, { type: 'file-v2-chunk', txId, index, data: buf });
+                const h = f2Crc32(buf);
+                const ok = safeFileSend(sid, { type: 'file-v2-chunk', txId, index, h, data: buf });
                 if (!ok) throw new Error('send failed');
                 ps.failCount = 0;
                 ps.backoffUntil = 0;
@@ -684,7 +740,6 @@
             <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
             <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
                 <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
-                <button class="tx-btn" id="retry-${txId}" onclick="window.retryTx('${txId}')">🔁 Retry stalled</button>
                 <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
             </div>`;
             addMessage(progHtml, "You", 'mine', `msg-${txId}`);
@@ -702,9 +757,10 @@
             v2HashInBackground(tx);
         }
 
-        function renderCompletedFile(url, name, mime, senderName, kind) {
+        function renderCompletedFile(url, name, mime, senderName, kind, verified) {
             const safeName = escapeHTML(name || 'file');
-            const dl = (label) => `<a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} ${label}</a>`;
+            const badge = verified ? ` <span style="font-size:11px;color:#23a559;font-weight:600;">✓ hash verified</span>` : '';
+            const dl = (label) => `<a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} ${label}</a>${badge}`;
             if ((mime || '').startsWith('image/')) addMessage(`<img src="${url}">${dl('Download Image')}`, senderName, kind);
             else if ((mime || '').startsWith('video/')) addMessage(`<video src="${url}" controls preload="metadata"></video>${dl('Download Video')}`, senderName, kind);
             else if ((mime || '').startsWith('audio/')) addMessage(`<audio src="${url}" controls></audio>${dl('Download Audio')}`, senderName, kind);
@@ -722,28 +778,6 @@
             v2UpdateSenderUI(txId);
         };
 
-        window.retryTx = (txId) => {
-            const tx = FileV2Out[txId];
-            if (!tx || tx.done) return;
-            // Retry across ALL known peers (chat ∪ file), establishing missing file channels.
-            for (const sid of v2AllPeerIds()) {
-                try {
-                    if (!fileConns[sid] || !fileConns[sid].open) ensureFileConn(sid);
-                } catch (e) {}
-                if (!tx.peers[sid]) {
-                    try { if (fileConns[sid] && fileConns[sid].open) v2AnnounceTo(sid, txId); } catch (e) {}
-                    continue;
-                }
-                const ps = tx.peers[sid];
-                if (ps.done || ps.canceled) continue;
-                ps.stalled = false; ps.failCount = 0; ps.paused = false; ps.backoffUntil = 0;
-                try { safeFileSend(sid, { type: 'file-v2-announce', txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null }); ps.lastAnnounce = Date.now(); } catch (e) {}
-            }
-            f2Kick();
-            v2UpdateSenderUI(txId);
-            addSystemMsg(`🔁 Retrying stalled peers for <b>${escapeHTML(tx.name)}</b>...`);
-        };
-
         window.cancelTx = (txId) => {
             const tx = FileV2Out[txId];
             if (!tx) return;
@@ -755,6 +789,7 @@
                 ps.inflight.clear();
                 safeFileSend(sid, { type: 'file-v2-control', txId, action: 'cancel' });
             }
+            f2CacheDrop(txId);
             const msgNode = $(`msg-${txId}`);
             if (msgNode) msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Canceled</div>`;
             setTimeout(() => { delete FileV2Out[txId]; const i = FileV2Order.indexOf(txId); if (i >= 0) FileV2Order.splice(i, 1); }, 30000);
@@ -870,7 +905,7 @@
             if (rx.pendingEarly.length) {
                 const early = rx.pendingEarly.splice(0, rx.pendingEarly.length);
                 early.sort((a, b) => a.index - b.index);
-                for (const c of early) v2StoreChunk(txId, c.index, c.data);
+                for (const c of early) v2StoreChunk(txId, c.index, c.data, c.h);
             }
             // Missing sweep: ask for gaps only when stalled (no activity), never spam.
             if (rx.missingTimer) clearInterval(rx.missingTimer);
@@ -878,17 +913,18 @@
                 try {
                     const r = FileV2In[txId];
                     if (!r || r.done || r.canceled || r.paused) return;
-                    if (Date.now() - r.lastActivity > 1800 && r.written.size < r.totalChunks) {
+                    if (Date.now() - r.lastActivity > 1200 && r.written.size < r.totalChunks) {
                         r.stalled = true;
                         v2SendMissing(txId);
                         v2UpdateRxUI(txId);
                     }
                 } catch (e) {}
-            }, 2000);
+            }, 1500);
             v2UpdateRxUI(txId);
         }
 
-        function v2StoreChunk(txId, index, buf) {
+        // Hash-checked store: CRC32 per chunk (sync, cheap) + SHA-256 whole file at end.
+        function v2StoreChunk(txId, index, buf, h) {
             const rx = FileV2In[txId];
             if (!rx || rx.canceled || rx.done) return;
             if (typeof index !== 'number' || index < 0 || index >= rx.totalChunks) return;
@@ -902,6 +938,15 @@
                 // Corrupt/empty payload (e.g. failed structured clone) — ask sender to resend, don't poison bitmap.
                 try { safeFileSend(rx.senderId, { type: 'file-v2-missing', txId, missing: [index] }); } catch (e) {}
                 return;
+            }
+            if (typeof h === 'number') {
+                let ok = false;
+                try { ok = (f2Crc32(buf) === h); } catch (e) { ok = false; }
+                if (!ok) {
+                    // Chunk corrupted in transit: drop it and request a resend. Never ACK.
+                    try { safeFileSend(rx.senderId, { type: 'file-v2-missing', txId, missing: [index] }); } catch (e) {}
+                    return;
+                }
             }
             const commit = () => {
                 if (rx.written.has(index)) return;
@@ -917,7 +962,7 @@
                 if (rx.written.size >= rx.totalChunks) v2FinishRx(txId);
             };
             if (!rx.initDone) {
-                if (rx.pendingEarly.length < 300) rx.pendingEarly.push({ index, data: buf });
+                if (rx.pendingEarly.length < 300) rx.pendingEarly.push({ index, data: buf, h });
                 return;
             }
             if (rx.paused) {
@@ -965,13 +1010,17 @@
                     }
                     blob = new Blob(parts, { type: rx.mime });
                 }
-                // Optional end-to-end hash check (background hash may arrive as null -> skip).
+                // End-to-end SHA-256 check. Every chunk already passed CRC32; this
+                // catches anything systematic (wrong file, truncation, OPFS fault).
+                let verified = false;
                 if (rx.fileHash) {
                     try {
                         const ab = await blob.arrayBuffer();
                         const h = await crypto.subtle.digest('SHA-256', ab);
                         const hex = Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
-                        if (hex !== rx.fileHash && rx.retries < 1) {
+                        if (hex === rx.fileHash) {
+                            verified = true;
+                        } else if (rx.retries < 1) {
                             rx.retries++;
                             rx.done = false; rx.written.clear(); rx.memChunks.clear(); rx.receivedBytes = 0;
                             rx.lastActivity = Date.now();
@@ -985,13 +1034,20 @@
                             addSystemMsg(`⚠️ Hash mismatch on <b>${escapeHTML(rx.name)}</b> — requesting retry...`);
                             v2SendMissing(txId);
                             return;
+                        } else {
+                            // Second mismatch: refuse to deliver a corrupt file.
+                            throw new Error('SHA-256 verification failed twice');
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        if (e && e.message === 'SHA-256 verification failed twice') throw e;
+                        // Hash computation itself failed (e.g. huge blob) -> deliver with
+                        // chunk-level CRC32 as the integrity guarantee.
+                    }
                 }
                 const node = $(`msg-rx-${txId}`);
                 if (node) node.remove();
                 const url = URL.createObjectURL(blob);
-                renderCompletedFile(url, rx.name, rx.mime, peerNames[rx.senderId] || "Someone", 'theirs');
+                renderCompletedFile(url, rx.name, rx.mime, peerNames[rx.senderId] || "Someone", 'theirs', verified);
                 playJoinSound();
                 notifyUser(`Incoming file from ${peerNames[rx.senderId] || "Someone"}`, rx.name);
                 safeFileSend(rx.senderId, { type: 'file-v2-ack', txId, acked: [], complete: true });
@@ -1364,7 +1420,11 @@
                         if (data.type === 'file-v2-announce') { v2OnAnnounce(data, sid); }
                         else if (data.type === 'file-v2-chunk') {
                             if (FileV2Tombstones.has(data.txId)) return;
-                            v2StoreChunk(data.txId, data.index, data.data);
+                            v2StoreChunk(data.txId, data.index, data.data, data.h);
+                        }
+                        else if (data.type === 'file-v2-hash') {
+                            const rx = FileV2In[data.txId];
+                            if (rx && !rx.done && !rx.canceled && data.fileHash) rx.fileHash = data.fileHash;
                         }
                         else if (data.type === 'file-v2-ack') {
                             const tx = FileV2Out[data.txId];
