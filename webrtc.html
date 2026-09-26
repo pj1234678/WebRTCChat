@@ -422,10 +422,10 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
    ============================================================ */
 (function FileV2Engine(){
 'use strict';
-const CHUNK=64*1024, ACK_TIMEOUT=3000, MAX_CWND=256, OPFS_THRESHOLD=5*1024*1024, MISSING_INTERVAL=4000, SPEED_WINDOW=5000;
+const CHUNK=64*1024, ACK_TIMEOUT=3000, MAX_CWND=256, MEMORY_MAX=64*1024*1024, BLOB_URL_MAX=64*1024*1024, MISSING_INTERVAL=4000, SPEED_WINDOW=5000;
 const transfers=new Map();
 const uid=()=>'f'+Date.now().toString(36)+Math.random().toString(36).slice(2,10);
-const nowT=()=>Date.now(), sleep=ms=>new Promise(r=>setTimeout(r,ms)), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const nowT=()=>Date.now(), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const chunkLen=(idx,total,size)=> idx<total-1? CHUNK : size-idx*CHUNK;
 const sanitize=n=>String(n||'file').replace(/[^\w.\-]+/g,'_').slice(0,80)||'file';
 function netBroadcast(m){ try{ if(window.Search&&window.Search.broadcast) return window.Search.broadcast(m); }catch(_){} }
@@ -434,14 +434,15 @@ function netSend(t,m){ if(!t||t==='broadcast') return netBroadcast(m); return ne
 function uiUpdate(tr){ try{ const pub=publicView(tr); if(window.FileUI&&window.FileUI.updateTransferUI) window.FileUI.updateTransferUI(pub); }catch(_){} }
 function uiRender(){}
 function publicView(tr){ if(!tr) return null; const done=tr.role==='send'?tr.acked.size:tr.receivedCount;
-  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.ackedBytes||tr.receivedBytes||0,cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
+  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.ackedBytes||tr.receivedBytes||0,cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,needsSave:!!(tr.role==='recv'&&tr.complete&&!tr.cancelled&&!tr.url&&tr.opfsHandle),confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
 const CRC_T=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; } return t; })();
 function crc32(data){ let c=0xFFFFFFFF; for(let i=0;i<data.length;i++) c=CRC_T[(c^data[i])&0xFF]^(c>>>8); return ((c^0xFFFFFFFF)>>>0).toString(16).padStart(8,'0'); }
-async function sha256Whole(file){ const PART=2*1024*1024, size=file.size>>>0; if(!crypto.subtle) throw new Error('no-subtle');
-  if(size===0){ const d=await crypto.subtle.digest('SHA-256',new Uint8Array(0)); return [...new Uint8Array(d)].map(b=>b.toString(16).padStart(2,'0')).join(''); }
-  const parts=[]; for(let off=0;off<size;off+=PART){ parts.push(new Uint8Array(await file.slice(off,Math.min(size,off+PART)).arrayBuffer())); await sleep(0); }
-  let total=0; for(const p of parts) total+=p.length; const all=new Uint8Array(total); let o=0; for(const p of parts){ all.set(p,o); o+=p.length; }
-  const dg=await crypto.subtle.digest('SHA-256',all); return [...new Uint8Array(dg)].map(b=>b.toString(16).padStart(2,'0')).join(''); }
+const hexB=h=>[...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,'0')).join('');
+async function chainHash(total,readSlice){ // chained SHA-256 over sequential slices, O(1) memory for any file size
+  if(!crypto.subtle) return null; const STEP=4*1024*1024; let h=new Uint8Array(0);
+  if((total>>>0)===0){ return hexB(await crypto.subtle.digest('SHA-256',new Uint8Array(0))); }
+  for(let off=0;off<total;off+=STEP){ const part=await readSlice(off,Math.min(total,off+STEP)); const buf=new Uint8Array(h.length+part.length); buf.set(h,0); buf.set(part,h.length); h=new Uint8Array(await crypto.subtle.digest('SHA-256',buf)); }
+  return hexB(h.buffer); }
 function trackSpeed(tr,add){ const t=nowT(); tr.samples=tr.samples||[]; tr.ackedBytes=(tr.ackedBytes||0)+add; tr.samples.push({t,b:tr.ackedBytes}); while(tr.samples.length>2&&t-tr.samples[0].t>SPEED_WINDOW) tr.samples.shift();
   if(tr.samples.length>=2){ const f=tr.samples[0],l=tr.samples[tr.samples.length-1]; const dt=(l.t-f.t)/1000,db=l.b-f.b; const v=dt>0.05?db/dt:0; tr.speedMBs=v/(1024*1024); tr.etaSec=v>1?Math.ceil((tr.size-tr.ackedBytes)/v):null; } else { tr.speedMBs=0; tr.etaSec=null; } }
 async function opfsDir(){ try{ if(!navigator.storage||typeof navigator.storage.getDirectory!=='function') return null; return await navigator.storage.getDirectory(); }catch(_){ return null; } }
@@ -451,7 +452,7 @@ async function sendFileV2(file,target){ if(!file) throw new Error('no file'); co
   transfers.set(id,tr);
   netSend(tgt,{t:'file-announce',id,name:tr.name,size,total,fileType:tr.fileType,sender:tr.selfId});
   uiUpdate(tr); uiRender(); pumpSender(tr).catch(()=>{});
-  sha256Whole(file).then(h=>{ if(tr.cancelled) return; tr.hash=h; netSend(tgt,{t:'file-hash',id,sha256:h}); uiUpdate(tr); }).catch(()=>{});
+  chainHash(file.size>>>0,async (o,e)=>new Uint8Array(await file.slice(o,e).arrayBuffer())).then(h=>{ if(!h||tr.cancelled) return; tr.hash=h; netSend(tgt,{t:'file-hash',id,sha256:h}); uiUpdate(tr); }).catch(()=>{});
   return id; }
 async function sendOneChunk(tr,idx){ const off=idx*CHUNK,end=Math.min(tr.size,off+CHUNK); let buf; try{ buf=await tr.file.slice(off,end).arrayBuffer(); }catch(e){ tr.error='slice-failed'; uiUpdate(tr); return; }
   const u8=new Uint8Array(buf), crc=crc32(u8), payload=u8.buffer.slice(0);
@@ -476,15 +477,19 @@ function pauseTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send'
 function resumeTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send') return false; if(tr.cancelled||tr.done||tr.complete) return false; tr.paused=false; uiUpdate(tr); if(tr.role==='send') pumpSender(tr).catch(()=>{}); return true; }
 function cancelTransfer(id){ const tr=transfers.get(id); if(!tr) return false; tr.cancelled=true; tr.paused=false;
   if(tr.role==='send'){ for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); netSend(tr.target,{t:'file-cancel',id:tr.id}); }
-  else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } if(tr.senderPeer) netSendTo(tr.senderPeer,{t:'file-cancel',id:tr.id}); }
+  else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } if(tr.senderPeer) netSendTo(tr.senderPeer,{t:'file-cancel',id:tr.id}); deleteOpfsFile(tr); }
   uiUpdate(tr); uiRender(); return true; }
 async function ensureRecvEntry(msg,peerId){ let tr=transfers.get(msg.id);
   if(tr){ // re-announce (e.g. sender came back with a new peer ID after redial): adopt the live sender
     if(tr.role==='recv'){ if(peerId&&tr.senderPeer!==peerId) tr.senderPeer=peerId; if(msg.sha256&&!tr.expectedHash) tr.expectedHash=String(msg.sha256).toLowerCase(); }
     return tr; }
-  tr={id:msg.id,role:'recv',name:sanitize(msg.name),size:msg.size>>>0,total:msg.total>>>0,fileType:msg.fileType||'application/octet-stream',senderPeer:peerId||msg.sender||null,target:null,chunks:new Map(),receivedSet:new Set(),receivedCount:0,receivedBytes:0,ackedBytes:0,expectedHash:msg.sha256||null,done:false,complete:false,paused:false,cancelled:false,startTime:nowT(),samples:[],speedMBs:0,etaSec:null,useOPFS:false,writable:null,writeLock:Promise.resolve(),opfsHandle:null,lastActivity:nowT(),missingTimer:null,url:null,blob:null,isImage:String(msg.fileType||'').startsWith('image/'),hashOk:null,error:null};
+  tr={id:msg.id,role:'recv',name:sanitize(msg.name),size:msg.size>>>0,total:msg.total>>>0,fileType:msg.fileType||'application/octet-stream',senderPeer:peerId||msg.sender||null,target:null,chunks:new Map(),receivedSet:new Set(),receivedCount:0,receivedBytes:0,ackedBytes:0,expectedHash:msg.sha256||null,done:false,complete:false,paused:false,cancelled:false,startTime:nowT(),samples:[],speedMBs:0,etaSec:null,useOPFS:false,writable:null,writeLock:Promise.resolve(),opfsHandle:null,opfsName:null,lastActivity:nowT(),missingTimer:null,url:null,blob:null,isImage:String(msg.fileType||'').startsWith('image/'),hashOk:null,error:null};
   if(!tr.total||tr.total<=0) return null; transfers.set(tr.id,tr);
-  if(tr.size>OPFS_THRESHOLD){ try{ const dir=await opfsDir(); if(dir){ const h=await dir.getFileHandle('smc-'+tr.id+'-'+tr.name,{create:true}); const w=await h.createWritable(); tr.opfsHandle=h; tr.writable=w; tr.useOPFS=true; } }catch(_){ tr.useOPFS=false; tr.writable=null; } }
+  try{ const dir=await opfsDir(); if(dir){ const nm='smc-'+tr.id+'-'+tr.name; const h=await dir.getFileHandle(nm,{create:true}); const w=await h.createWritable(); tr.opfsName=nm; tr.opfsHandle=h; tr.writable=w; tr.useOPFS=true; } }catch(_){ tr.useOPFS=false; tr.writable=null; }
+  if(!tr.useOPFS&&tr.size>MEMORY_MAX){ // no disk backing and too big to hold in RAM: refuse instead of OOM
+    tr.cancelled=true; tr.error='storage-unavailable';
+    try{ netSendTo(tr.senderPeer,{t:'file-cancel',id:tr.id}); }catch(_){}
+    uiUpdate(tr); uiRender(); return tr; }
   tr.missingTimer=setInterval(()=>requestMissingIfStalled(tr.id),MISSING_INTERVAL); uiUpdate(tr); uiRender(); return tr; }
 function toU8(d){ if(d instanceof Uint8Array) return d; if(d instanceof ArrayBuffer) return new Uint8Array(d); if(Array.isArray(d)) return Uint8Array.from(d); return null; }
 async function onChunkRecv(tr,msg,peerId){ if(tr.done||tr.cancelled||tr.complete||tr.paused) return; const idx=msg.idx>>>0; if(idx>=tr.total) return;
@@ -493,21 +498,51 @@ async function onChunkRecv(tr,msg,peerId){ if(tr.done||tr.cancelled||tr.complete
   if(msg.crc&&String(msg.crc).toLowerCase()!==String(crc32(u8)).toLowerCase()){ netSendTo(tr.senderPeer||peerId,{t:'file-missing',id:tr.id,missing:[idx]}); return; }
   try{ if(tr.useOPFS&&tr.writable){ const cp=new Uint8Array(u8.length); cp.set(u8); tr.writeLock=tr.writeLock.then(()=>tr.writable.write({type:'write',position:idx*CHUNK,data:cp})).catch(()=>{throw new Error('opfs-write');}); await tr.writeLock; }
     else { const cp=new Uint8Array(u8.length); cp.set(u8); tr.chunks.set(idx,cp); } }
-  catch(_){ try{ tr.useOPFS=false; if(tr.writable){ try{await tr.writable.abort();}catch(_){} tr.writable=null; } const cp=new Uint8Array(u8.length); cp.set(u8); tr.chunks.set(idx,cp); }catch(_){ return; } }
+  catch(_){ if(tr.size>MEMORY_MAX){ tr.cancelled=true; tr.error='storage-unavailable'; try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(__){} try{ netSendTo(tr.senderPeer,{t:'file-cancel',id:tr.id}); }catch(__){} deleteOpfsFile(tr); uiUpdate(tr); uiRender(); return; }
+    try{ tr.useOPFS=false; if(tr.writable){ try{await tr.writable.abort();}catch(_){} tr.writable=null; } const cp=new Uint8Array(u8.length); cp.set(u8); tr.chunks.set(idx,cp); }catch(_){ return; } }
   tr.receivedSet.add(idx); tr.receivedCount=tr.receivedSet.size; tr.receivedBytes+=u8.length; tr.ackedBytes=tr.receivedBytes; tr.lastActivity=nowT(); trackSpeed(tr,u8.length);
   netSendTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); uiUpdate(tr);
   if(tr.receivedCount>=tr.total) await assembleRecv(tr.id); }
 function requestMissingIfStalled(id){ const tr=transfers.get(id); if(!tr||tr.role!=='recv'||tr.done||tr.cancelled||tr.complete||tr.paused) return; if(nowT()-tr.lastActivity<3000) return; if(tr.receivedCount>=tr.total) return;
   const missing=[]; for(let i=0;i<tr.total&&missing.length<200;i++) if(!tr.receivedSet.has(i)) missing.push(i);
   if(missing.length){ try{ netSendTo(tr.senderPeer,{t:'file-missing',id:tr.id,missing}); }catch(_){} } }
+function verifyRecvHash(tr){ if(!tr||tr.verifying||tr.hashOk!==null) return; tr.verifying=true;
+  (async()=>{ try{
+    if(!tr.expectedHash||!crypto.subtle){ tr.verifying=false; return; }
+    const src=tr.blob||(tr.opfsHandle?await tr.opfsHandle.getFile():null);
+    if(!src){ tr.verifying=false; return; }
+    const h=await chainHash(src.size>>>0,async (o,e)=>new Uint8Array(await src.slice(o,e).arrayBuffer()));
+    if(h){ tr.hashOk=(h.toLowerCase()===String(tr.expectedHash).toLowerCase()); if(!tr.hashOk) tr.error='hash-mismatch'; }
+  }catch(_){ tr.hashOk=null; } tr.verifying=false; uiUpdate(tr); uiRender(); })(); }
 async function assembleRecv(id){ const tr=transfers.get(id); if(!tr||tr.role!=='recv'||tr.complete||tr.cancelled) return; try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} tr.missingTimer=null;
-  try{ let blob; if(tr.useOPFS&&tr.writable&&tr.opfsHandle){ await tr.writeLock; try{await tr.writable.close();}catch(_){} tr.writable=null; const f=await tr.opfsHandle.getFile(); blob=new Blob([f],{type:tr.fileType}); }
-    else { const parts=new Array(tr.total); for(let i=0;i<tr.total;i++){ const c=tr.chunks.get(i); if(!c) throw new Error('missing-chunk-'+i); parts[i]=c; } blob=new Blob(parts,{type:tr.fileType}); }
-    if(tr.expectedHash){ try{ const h=await sha256Whole(blob); tr.hashOk=(h.toLowerCase()===String(tr.expectedHash).toLowerCase()); if(!tr.hashOk) tr.error='hash-mismatch'; }catch(_){ tr.hashOk=null; } }
-    tr.blob=blob; try{ if(tr.url) URL.revokeObjectURL(tr.url); }catch(_){} tr.url=URL.createObjectURL(blob); tr.isImage=String(tr.fileType).startsWith('image/'); tr.done=true; tr.complete=true; tr.speedMBs=0; tr.etaSec=0; tr.chunks.clear();
+  try{
+    if(tr.useOPFS&&tr.writable&&tr.opfsHandle){
+      await tr.writeLock; try{await tr.writable.close();}catch(_){} tr.writable=null;
+      if(tr.size<=BLOB_URL_MAX){ const f=await tr.opfsHandle.getFile(); const blob=new Blob([f],{type:tr.fileType}); tr.blob=blob; try{ if(tr.url) URL.revokeObjectURL(tr.url); }catch(_){} tr.url=URL.createObjectURL(blob); tr.isImage=String(tr.fileType).startsWith('image/'); }
+      // bigger files stay in OPFS; the user streams them to disk via saveToDisk (constant memory)
+    }
+    else { const parts=new Array(tr.total); for(let i=0;i<tr.total;i++){ const c=tr.chunks.get(i); if(!c) throw new Error('missing-chunk-'+i); parts[i]=c; } const blob=new Blob(parts,{type:tr.fileType}); tr.blob=blob; try{ if(tr.url) URL.revokeObjectURL(tr.url); }catch(_){} tr.url=URL.createObjectURL(blob); tr.isImage=String(tr.fileType).startsWith('image/'); }
+    tr.done=true; tr.complete=true; tr.speedMBs=0; tr.etaSec=0; try{ tr.chunks.clear(); }catch(_){}
     try{ netSendTo(tr.senderPeer,{t:'file-done-ack',id:tr.id}); }catch(_){}
+    verifyRecvHash(tr);
     uiUpdate(tr); uiRender(); }
   catch(e){ tr.error=String((e&&e.message)||e); uiUpdate(tr); } }
+function deleteOpfsFile(tr){ try{ const nm=tr&&tr.opfsName; if(!nm) return; tr.opfsHandle=null; (async()=>{ try{ const dir=await opfsDir(); if(dir) await dir.removeEntry(nm); }catch(_){} })(); }catch(_){} }
+async function saveToDisk(id){ const tr=transfers.get(id); if(!tr||tr.role!=='recv'||!tr.complete||tr.cancelled) return false;
+  if(tr.url){ try{ const a=document.createElement('a'); a.href=tr.url; a.download=tr.name||('file-'+id); document.body.appendChild(a); a.click(); setTimeout(()=>{try{a.remove();}catch(_){}},500); return true; }catch(_){ return false; } }
+  try{
+    if(!tr.opfsHandle) return false;
+    const f=await tr.opfsHandle.getFile();
+    if(window.showSaveFilePicker){
+      const h=await window.showSaveFilePicker({suggestedName:tr.name||('file-'+id)});
+      const w=await h.createWritable();
+      await f.stream().pipeTo(w); // backpressured stream, constant memory for any size
+      return true;
+    }
+    const url=URL.createObjectURL(f); // no File System Access API: bounded fallback (large files may OOM)
+    try{ const a=document.createElement('a'); a.href=url; a.download=tr.name||('file-'+id); document.body.appendChild(a); a.click(); setTimeout(()=>{try{a.remove();}catch(_){}},500); }finally{ setTimeout(()=>{try{URL.revokeObjectURL(url);}catch(_){}},30000); }
+    return true;
+  }catch(e){ if(e&&e.name==='AbortError') return false; tr.error=String((e&&e.message)||e); uiUpdate(tr); return false; } }
 function handleHello(peerId){ if(!peerId) return; let me=null; try{ me=window.Search&&window.Search.myId; }catch(_){}
   for(const tr of transfers.values()){ if(tr.cancelled||tr.done) continue;
     if(tr.role!=='send') continue;
@@ -518,14 +553,14 @@ function handleHello(peerId){ if(!peerId) return; let me=null; try{ me=window.Se
 async function handleFileMsg(msg,peerId){ try{ if(!msg||typeof msg.t!=='string') return false; if(msg.t==='hello'){ handleHello(peerId); return false; } if(!msg.t.startsWith('file-')) return false;
     switch(msg.t){
       case 'file-announce': if(msg.id==null||msg.size==null||msg.total==null) return true; { const tr=await ensureRecvEntry(msg,peerId); if(tr&&tr.role==='recv'&&!tr.done&&!tr.complete&&!tr.cancelled&&tr.receivedCount>0&&tr.receivedCount<tr.total){ tr.lastActivity=0; try{ requestMissingIfStalled(tr.id); }catch(_){} } } return true;
-      case 'file-hash': { const tr=transfers.get(msg.id); if(tr&&tr.role==='recv'){ tr.expectedHash=String(msg.sha256||'').toLowerCase()||null; uiUpdate(tr); } return true; }
+      case 'file-hash': { const tr=transfers.get(msg.id); if(tr&&tr.role==='recv'){ tr.expectedHash=String(msg.sha256||'').toLowerCase()||null; if(tr.complete&&!tr.cancelled) verifyRecvHash(tr); uiUpdate(tr); } return true; }
       case 'file-chunk': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='recv') return true; if(peerId&&tr.senderPeer!==peerId) tr.senderPeer=peerId; await onChunkRecv(tr,msg,peerId); return true; }
       case 'file-ack': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='send') return true; onAck(tr,msg.idx>>>0); return true; }
       case 'file-missing': { const tr=transfers.get(msg.id); if(!tr) return true; if(tr.role==='send') onMissing(tr,msg.missing); return true; }
       case 'file-done-ack': { const tr=transfers.get(msg.id); if(tr&&tr.role==='send'&&peerId){ tr.confirmations.add(peerId); uiUpdate(tr); } return true; }
       case 'file-cancel': { const tr=transfers.get(msg.id); if(tr&&!tr.complete){ tr.cancelled=true; if(tr.role==='send'){ for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); } else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } } uiUpdate(tr); uiRender(); } return true; }
       default: return false; } }catch(_){ return true; } }
-window.FileV2={sendFileV2,pauseTransfer,resumeTransfer,cancelTransfer,transfers,handleFileMsg};
+window.FileV2={sendFileV2,pauseTransfer,resumeTransfer,cancelTransfer,saveToDisk,transfers,handleFileMsg};
 })();
 
 /* ============================================================
@@ -668,16 +703,22 @@ window.FileUI={
       sp.textContent='⬆ '+pub.name+' ('+fmtBytes(pub.size)+') — sent ✓'+(pub.confirmations&&pub.confirmations.length?' ('+pub.confirmations.length+' confirmed)':'');
       d.appendChild(sp);
     } else {
-      if(!pub.url) return;
+      if(!pub.url&&!pub.needsSave) return;
       d.className='msg';
       const meta=document.createElement('div'); meta.className='meta'; meta.textContent='📁 '+(pub.sender||'peer')+' • '+ts; d.appendChild(meta);
       const label=pub.name+' ('+fmtBytes(pub.size)+')'+(pub.hashOk===false?' ⚠ hash mismatch':pub.hashOk?' ⛨ verified':'');
       const kind=String(pub.fileType||'');
-      if(kind.indexOf('image/')===0||pub.isImage){ const im=document.createElement('img'); im.src=pub.url; im.alt=label; d.appendChild(im); }
-      else if(kind.indexOf('video/')===0){ const vd=document.createElement('video'); vd.src=pub.url; vd.controls=true; vd.playsInline=true; vd.preload='metadata'; d.appendChild(vd); }
-      else if(kind.indexOf('audio/')===0){ const au=document.createElement('audio'); au.src=pub.url; au.controls=true; au.autoplay=true; d.appendChild(au); try{ const pr=au.play(); if(pr&&pr.catch) pr.catch(()=>{}); }catch(e){} }
+      if(pub.url){
+        if(kind.indexOf('image/')===0||pub.isImage){ const im=document.createElement('img'); im.src=pub.url; im.alt=label; d.appendChild(im); }
+        else if(kind.indexOf('video/')===0){ const vd=document.createElement('video'); vd.src=pub.url; vd.controls=true; vd.playsInline=true; vd.preload='metadata'; d.appendChild(vd); }
+        else if(kind.indexOf('audio/')===0){ const au=document.createElement('audio'); au.src=pub.url; au.controls=true; au.autoplay=true; d.appendChild(au); try{ const pr=au.play(); if(pr&&pr.catch) pr.catch(()=>{}); }catch(e){} }
+      }
       const sp=document.createElement('div'); sp.textContent=label; d.appendChild(sp);
-      const a=document.createElement('a'); a.href=pub.url; a.download=pub.name||'file'; a.textContent='⬇ Download '+(pub.name||'file'); d.appendChild(a);
+      if(pub.url){ const a=document.createElement('a'); a.href=pub.url; a.download=pub.name||'file'; a.textContent='⬇ Download '+(pub.name||'file'); d.appendChild(a); }
+      else { const b=document.createElement('button'); b.textContent='💾 Save to disk ('+fmtBytes(pub.size)+')'; b.style.cssText='margin-top:6px;background:var(--primary);color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer;font-weight:700';
+        b.onclick=()=>{ try{ b.disabled=true; window.FileV2.saveToDisk(pub.id).then(ok=>{ if(!ok){ try{toast('Save cancelled or failed');}catch(_){} } }).catch(()=>{ try{toast('Save failed');}catch(_){} }).finally(()=>{ try{b.disabled=false;}catch(_){} }); }catch(e){} };
+        d.appendChild(b);
+        const hint=document.createElement('div'); hint.style.cssText='font-size:11px;opacity:.7;margin-top:4px'; hint.textContent='Stored in browser storage — save streams it to disk.'; d.appendChild(hint); }
     }
     chatStream.appendChild(d); chatStream.scrollTop=chatStream.scrollHeight;
     while(chatStream.children.length>300) chatStream.firstChild.remove();
