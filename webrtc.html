@@ -196,7 +196,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     </div>
     <footer id="toolbar">
       <button id="btnMic" class="tgl" title="Mic on/off">🎙️</button>
-      <button id="btnCam" class="tgl" title="Webcam on/off">📷</button>
+      <button id="btnCam" class="tgl off" title="Webcam on/off">🚫</button>
       <button id="btnScreen" class="tgl" title="Share screen">🖥️</button>
       <button id="btnFile" class="tgl" title="Send file">📎</button>
       <input id="msgInput" placeholder="Message…" autocomplete="off" maxlength="2000">
@@ -766,6 +766,38 @@ window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new
     }
     return this._askPromise;
   },
+  async primePermissions(){
+    // Ask for camera+mic permission up-front, but leave camera OFF (LED off, no broadcast)
+    // until the user presses the Cam button. Mic stays ON.
+    const s=await this.ensureLocal();
+    try{
+      const vt=s&&s.getVideoTracks&&s.getVideoTracks()[0];
+      if(vt){
+        try{ vt.enabled=false; }catch(e){}
+        try{ vt.stop(); }catch(e){} // release hardware so light goes off; permission stays granted
+        try{ s.removeTrack(vt); }catch(e){}
+      }
+    }catch(e){}
+    try{
+      this.syncOutgoing(); // now audio-only
+      this.refreshLocalCard(); // removes local preview if it flashed
+      const b=document.querySelector('#btnCam');
+      if(b){ b.classList.add('off'); b.textContent='🚫'; }
+    }catch(e){}
+    return s;
+  },
+  redialAll(){
+    // Re-call everyone with the current outgoing stream (needed when video tracks are added/removed,
+    // since an audio-only call has no video sender to replaceTrack on).
+    try{
+      this.syncOutgoing();
+      const pids=Object.keys(this.calls||{});
+      pids.forEach(pid=>{ try{ const old=this.calls[pid]; delete this.calls[pid]; try{ old&&old.close(); }catch(e){} }catch(e){} });
+      pids.forEach(pid=>{ try{ this.callPeer(pid); }catch(e){} });
+      try{ this.dialAll(); }catch(e){}
+      try{ this.refreshLocalCard(); }catch(e){}
+    }catch(e){}
+  },
   syncOutgoing(){
     // One managed stream for all outgoing calls: screen video wins, else camera; always plus mic.
     try{
@@ -851,13 +883,45 @@ window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new
   onSignal(){}
 };
 window.addEventListener('smc-peers',()=>{ try{ if(window.Media&&(window.Media.outgoing||window.Media.local)) window.Media.dialAll(); }catch(e){} });
-$('#btnCam').addEventListener('click',async e=>{ const s=await window.Media.ensureLocal(); const t=s&&s.getVideoTracks()[0]; if(!t){ toast('No camera to toggle'); return; } t.enabled=!t.enabled; e.currentTarget.classList.toggle('off',!t.enabled); e.currentTarget.textContent=t.enabled?'📷':'🚫'; try{ window.Media.refreshLocalCard(); }catch(err){} });
+$('#btnCam').addEventListener('click',async e=>{
+  const b=e.currentTarget, M=window.Media;
+  try{
+    const s=await M.ensureLocal();
+    if(!s){ toast('No mic/camera found — data-only mode'); return; }
+    const live=s.getVideoTracks? s.getVideoTracks().find(t=>t.readyState==='live') : null;
+    if(!live){
+      // Camera OFF -> turn ON (fast: permission was already primed at startup)
+      b.disabled=true;
+      try{
+        if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ toast('Camera needs HTTPS or localhost'); return; }
+        const ns=await navigator.mediaDevices.getUserMedia({video:true});
+        const nt=ns.getVideoTracks()[0];
+        if(!nt) throw new Error('no-video-track');
+        try{ s.addTrack(nt); }catch(_){}
+        try{ ns.getAudioTracks().forEach(t=>{ try{t.stop();}catch(_){} }); }catch(_){}
+        try{ nt.enabled=true; }catch(_){}
+        // keep reference so stopping the temp container doesn't kill the live track in some browsers
+        try{ ns.removeTrack(nt); }catch(_){}
+        b.classList.remove('off'); b.textContent='📷';
+      }catch(err){ toast('Camera blocked or not found'); b.classList.add('off'); b.textContent='🚫'; return; }
+      finally{ b.disabled=false; }
+    }else{
+      // Camera ON -> turn OFF + release hardware so LED goes off
+      try{ live.enabled=false; }catch(_){}
+      try{ live.stop(); }catch(_){}
+      try{ s.removeTrack(live); }catch(_){}
+      b.classList.add('off'); b.textContent='🚫';
+    }
+    try{ M.redialAll(); }catch(_){ try{ M.syncOutgoing(); M.refreshLocalCard(); }catch(__){} }
+  }catch(err){ try{ toast('Camera toggle failed'); }catch(_){} }
+});
 $('#btnMic').addEventListener('click',async e=>{ const s=await window.Media.ensureLocal(); const t=s&&s.getAudioTracks()[0]; if(!t) return; t.enabled=!t.enabled; e.currentTarget.classList.toggle('off',!t.enabled); e.currentTarget.textContent=t.enabled?'🎙️':'🔇'; });
 $('#btnScreen').addEventListener('click',async e=>{
   const b=e.currentTarget, M=window.Media;
   try{
-    if(M.screen){ M.screen.getTracks().forEach(t=>t.stop()); M.screen=null; M.syncOutgoing(); const cam=M.local&&M.local.getVideoTracks()[0];
-      Object.values(M.calls).forEach(c=>{ try{ const snd=c.peerConnection&&c.peerConnection.getSenders().find(s=>s.track&&s.track.kind==='video'); if(snd&&cam) snd.replaceTrack(cam); }catch(_){} });
+    if(M.screen){ M.screen.getTracks().forEach(t=>t.stop()); M.screen=null; M.syncOutgoing(); const cam=M.local&&M.local.getVideoTracks().find(t=>t.readyState==='live');
+      if(cam){ Object.values(M.calls).forEach(c=>{ try{ const snd=c.peerConnection&&c.peerConnection.getSenders().find(s=>s.track&&s.track.kind==='video'); if(snd&&cam) snd.replaceTrack(cam); }catch(_){} }); }
+      else { try{ M.redialAll(); }catch(_){} }
       b.classList.remove('live'); b.textContent='🖥️'; try{window.Search.broadcast({t:'signal',kind:'screen-stop'});}catch(_){} try{M.refreshLocalCard();}catch(_){} return; }
     const ds=await navigator.mediaDevices.getDisplayMedia({video:true}); M.screen=ds; M.syncOutgoing(); const st=ds.getVideoTracks()[0];
     const redial=[];
@@ -870,8 +934,8 @@ $('#btnScreen').addEventListener('click',async e=>{
 window.addEventListener('smc-open',()=>{ renderPeers(); try{ if(window.Media&&window.Media.local){ window.Media.local.getAudioTracks().forEach(t=>{ try{ t.enabled=true; }catch(e){} }); const mb=$('#btnMic'); if(mb){ mb.classList.remove('off'); mb.textContent='🎙️'; } } }catch(e){} });
 addMsg({sys:true,text:'🚀 Super Mesh Chat v2.8 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
 renderPeers();
-/* startup: ask for camera + mic permission right away */
-try{ if(window.Media&&window.Media.ensureLocal) window.Media.ensureLocal(); }catch(e){}
+/* startup: prime mic+camera permission, but leave camera OFF until user presses Cam */
+try{ if(window.Media&&window.Media.primePermissions) window.Media.primePermissions(); }catch(e){}
 })();
 </script>
 </body>
