@@ -59,7 +59,6 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
 #btnJoin{background:var(--primary);color:#fff;font-weight:800}
 #btnJoin:hover{background:var(--primary-hover)}
 #btnJoin:disabled{opacity:.6;cursor:wait}
-#roomName{font-size:11px;color:var(--muted);margin-top:6px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #diagBox{margin:0 16px 12px;font-size:11px;color:var(--muted)}
 #diagBox summary{cursor:pointer;font-weight:700;text-transform:uppercase;letter-spacing:.6px;font-size:11px}
 #diagLines{font-family:monospace;font-size:10px;white-space:pre-wrap;margin-top:6px;max-height:120px;overflow-y:auto;background:#111214;border:1px solid #000;border-radius:7px;padding:6px 8px}
@@ -152,10 +151,10 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
 <div id="errBanner"></div>
 <div id="appLayout">
   <aside id="sidebar">
-    <div class="brand"><div class="brand-mark">S</div><h1>Super Mesh Chat<small>peer-to-peer mesh &bull; mesh-v1</small></h1></div>
+    <div class="brand"><div class="brand-mark">S</div><h1>Super Mesh Chat<small>peer-to-peer mesh</small></h1></div>
     <div class="side-row status-wrap"><span id="connStatus" class="warn"></span><span id="connLabel">enter password &amp; press Join</span><span style="flex:1"></span><span id="roomClock">00:00:00</span></div>
     <form id="joinForm" autocomplete="on" style="margin:0">
-      <div class="id-box"><div class="id-line"><input id="usernameInput" name="username" type="text" maxlength="24" placeholder="Username…" autocomplete="username" spellcheck="false"></div><div class="id-line" style="margin-top:8px"><input id="roomPass" name="room-password" type="password" placeholder="room password" autocomplete="current-password" spellcheck="false"><button id="btnJoin" type="submit" class="icon-btn" title="Join room">Join</button></div><div id="roomName" title="PeerJS room ID">room: lobby</div></div>
+      <div class="id-box"><div class="id-line"><input id="usernameInput" name="username" type="text" maxlength="24" placeholder="Username…" autocomplete="username" spellcheck="false"></div><div class="id-line" style="margin-top:8px"><input id="roomPass" name="room-password" type="password" placeholder="room password" autocomplete="current-password" spellcheck="false"><button id="btnJoin" type="submit" class="icon-btn" title="Join room">Join</button></div></div>
     </form>
     <div class="side-h"><span>Peers — <span id="peerCountSide">0</span></span><span>mesh</span></div>
     <div id="peerList"></div>
@@ -197,7 +196,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
 'use strict';
 /* ============================================================
    Super Mesh Chat — single-file P2P mesh
-   ROOM_ID fixed, channel mesh-v1, gossip + heartbeat + FileV2
+   ROOM_ID fixed, gossip + heartbeat + FileV2
    ============================================================ */
 const $ = s => document.querySelector(s);
 const pad2 = n => String(n).padStart(2,'0');
@@ -213,7 +212,7 @@ function tone(f0,f1,dur,type='sine',vol=.2,delay=0){ const c=ac(); if(!c) return
 const playJoin=()=>tone(660,880,.15,'sine',.22), playLeave=()=>tone(440,330,.18,'sine',.2), playNotify=()=>{tone(880,880,.09,'square',.10);tone(1320,1320,.07,'sine',.07,.06);};
 
 /* ============================================================
-   MODULE 1: Mesh connection stack (PeerJS 1.5.4, mesh-v1)
+   MODULE 1: Mesh connection stack (PeerJS 1.5.4)
    ============================================================ */
 window.SMC_hooks = window.SMC_hooks || {};
 (function MeshStack(){
@@ -257,7 +256,7 @@ function onPeersChanged(){ try{ if(typeof window.onPeersChanged==='function') wi
 function emit(type,from,msg){ window.dispatchEvent(new CustomEvent(type,{detail:{from,msg}})); const h=window.SMC_hooks||{}; const map={'smc-chat':'onChat','smc-typing':'onTyping','smc-presence':'onPresence','smc-file':'onFile','smc-sync':'onMeshSync'}; try{ if(map[type]&&typeof h[map[type]]==='function') h[map[type]](from,msg); }catch(e){} }
 function init(){ stopHeartbeat(); pendingRetry.forEach(to=>clearTimeout(to)); pendingRetry.clear(); updateRoomUI(); wireRoomBox(); setIdle(); }
 function setIdle(){ try{ const jl=$('#connLabel'); if(jl) jl.textContent='enter password & press Join'; const d=$('#connStatus'); if(d) d.className='warn'; }catch(e){} }
-function updateRoomUI(){ try{ const joined=!!myId; const rn=$('#roomName'); if(rn) rn.textContent=joined?('room: '+ROOM_ID):'room: (not joined)'; const rt=$('#roomTitle'); if(rt) rt.textContent=joined?(currentPass()||'lobby'):'lobby'; const rp=$('#roomPass'); if(rp&&document.activeElement!==rp){ let saved=null; try{ saved=localStorage.getItem('smc_room_pass'); }catch(e){} if(saved) rp.value=saved; } }catch(e){} }
+function updateRoomUI(){ try{ const joined=!!myId; const rt=$('#roomTitle'); if(rt) rt.textContent=joined?(currentPass()||'lobby'):'lobby'; const rp=$('#roomPass'); if(rp&&document.activeElement!==rp){ let saved=null; try{ saved=localStorage.getItem('smc_room_pass'); }catch(e){} if(saved) rp.value=saved; } }catch(e){} }
 function joinRoom(newPass){
   if(typeof Peer==='undefined'){ showErr('PeerJS not loaded yet — check network, then try Join again.'); try{ toast('PeerJS still loading…'); }catch(e){} return ROOM_ID; }
   const nextId=roomIdFromPass(newPass);
@@ -412,7 +411,7 @@ function sendMeshSync(){ if(!myId) return; const list=[...peers.values()].filter
 function stopHeartbeat(){ if(hbTimer){clearInterval(hbTimer);hbTimer=null;} if(meshSyncTimer){clearInterval(meshSyncTimer);meshSyncTimer=null;} if(reconcileTimer){clearInterval(reconcileTimer);reconcileTimer=null;} if(hostTimer){clearInterval(hostTimer);hostTimer=null;} }
 function updateConn(ok){ const d=$('#connStatus'),l=$('#connLabel'); if(!d) return; d.className=ok?'on':'warn'; if(l) l.textContent=ok?('connected'+(isHost?' (host)':'') ):'connecting…'; }
 window.Search={ peers, get myId(){return myId;}, get myName(){return myName;}, get isHost(){return isHost;}, get peer(){return peer;}, get pendingCount(){ try{return pendingRetry.size;}catch(e){return 0;} }, get retrying(){ return !!initRetryTo; }, broadcast, sendTo, setName, joinRoom,
-  get ROOM_ID(){return ROOM_ID;} };
+  get ROOM_ID(){return ROOM_ID;}, get roomPass(){ return currentPass(); } };
 window.addEventListener('beforeunload',()=>{ try{ broadcast({t:'presence',left:true,id:myId,name:myName}); peer&&peer.destroy(); }catch(e){} });
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
 })();
@@ -635,7 +634,7 @@ function renderPeers(){
   try{
     const dl=$('#diagLines');
     if(dl){
-      const rid=(window.Search&&window.Search.ROOM_ID)||'?';
+      const rid=(window.Search&&window.Search.roomPass)||(window.Search&&window.Search.ROOM_ID)||'?';
       const me=((window.Search&&window.Search.myId)||'—');
       const lines=['room '+rid, 'me '+String(me).slice(0,12)+(window.Search&&window.Search.isHost?' (host)':' (guest)')+' pend'+((window.Search&&window.Search.pendingCount)||0)+' retry:'+((window.Search&&window.Search.retrying)?'yes':'no')];
       all.forEach(p=>{
@@ -745,7 +744,7 @@ uInput.addEventListener('change',()=>{ try{ window.Search.setName(uInput.value.t
     }catch(err){ toast('Join failed'); }
   });
 })();
-window.addEventListener('smc-open',e=>{ try{ const rid=(window.Search&&window.Search.ROOM_ID)||''; addMsg({sys:true,text:'✅ Connected — room: '+rid}); }catch(_){} });
+window.addEventListener('smc-open',e=>{ try{ const rp=(window.Search&&window.Search.roomPass)||(window.Search&&window.Search.ROOM_ID)||''; addMsg({sys:true,text:'✅ Connected — room: '+rp}); }catch(_){} });
 window.addEventListener('smc-error',e=>{ try{ const d=e.detail||{}; const txt=(d.msg&&d.msg.message)||d.detail||'unknown'; addMsg({sys:true,text:'⚠ connection issue: '+txt}); }catch(_){} });
 
 /* sidebar: resizer + drawer */
