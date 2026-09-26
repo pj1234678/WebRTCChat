@@ -123,7 +123,8 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
 .msg.me a{color:#fff;text-decoration:underline}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 #typingInd{min-height:18px;font-size:12px;color:var(--muted);font-style:italic;padding:2px 4px}
-#fileTransfers{display:flex;flex-direction:column;gap:8px;padding:6px 0;max-height:150px;overflow-y:auto}
+#chatStream .transfer{align-self:flex-start;max-width:78%;animation:fadeIn .25s ease both}
+#chatStream .transfer.send{align-self:flex-end}
 .transfer{background:var(--bg-card);border-radius:10px;padding:8px 10px;font-size:12px}
 .transfer .t-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:6px}
 .transfer .t-name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
@@ -157,6 +158,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
   #roomClock{display:none}
   #videoGrid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr));max-height:32vh}
   .msg{max-width:92%}
+  #chatStream .transfer{max-width:92%}
   #toolbar{gap:6px}
   .tgl{width:38px;height:38px;font-size:15px}
 }
@@ -173,7 +175,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     </form>
     <div class="side-h"><span>Peers — <span id="peerCountSide">0</span></span><span>mesh</span></div>
     <div id="peerList"></div>
-    <div class="self-note">v2.6 • Drag right edge to resize • &lt;900px becomes drawer</div>
+    <div class="self-note">v2.8 • Drag right edge to resize • &lt;900px becomes drawer</div>
     <details id="diagBox"><summary>Diagnostics</summary><div id="diagLines">not joined yet</div></details>
     <div id="dragEdge" title="Resize"></div>
   </aside>
@@ -191,7 +193,6 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     <div id="chatWrap">
       <div id="chatStream"></div>
       <div id="typingInd"></div>
-      <div id="fileTransfers"></div>
     </div>
     <footer id="toolbar">
       <button id="btnMic" class="tgl" title="Mic on/off">🎙️</button>
@@ -525,7 +526,7 @@ window.FileV2Router=handleFileMsg;
    ============================================================ */
 (function App(){
 const chatStream=$('#chatStream'), peerList=$('#peerList'), typingInd=$('#typingInd');
-const filePanel=$('#fileTransfers'), msgInput=$('#msgInput');
+const msgInput=$('#msgInput');
 let typingTimer=null, lastTypeSent=0;
 const typingPeers=new Map();
 
@@ -619,24 +620,35 @@ window.FileUI={
     if(!pub) return;
     if(pub.complete){ const old=document.getElementById('tr-'+pub.id); if(old) old.remove(); window.FileUI.postFileMessage(pub); return; }
     let el=document.getElementById('tr-'+pub.id);
-    if(!el){ el=document.createElement('div'); el.className='transfer'; el.id='tr-'+pub.id; filePanel.appendChild(el); }
+    if(!el){
+      // Build the box ONCE so clicks are never eaten by re-renders; only text/width update after.
+      el=document.createElement('div'); el.className='transfer'+(pub.role==='send'?' send':''); el.id='tr-'+pub.id;
+      const top=document.createElement('div'); top.className='t-top';
+      const nm=document.createElement('span'); nm.className='t-name'; top.appendChild(nm);
+      const pc=document.createElement('span'); pc.className='t-stat'; top.appendChild(pc); el.appendChild(top);
+      const bar=document.createElement('div'); bar.className='progress';
+      const fill=document.createElement('div'); fill.className='t-fill'; bar.appendChild(fill); el.appendChild(bar);
+      const meta=document.createElement('div'); meta.className='t-meta'; el.appendChild(meta);
+      const btns=document.createElement('div'); btns.className='t-btns';
+      if(pub.role==='send'){ const bP=document.createElement('button'); bP.setAttribute('data-act','pause');
+        bP.onclick=()=>{ try{ const live=window.FileV2.transfers.get(pub.id); const paused=live?!!live.paused:!!pub.paused; if(paused) window.FileV2.resumeTransfer(pub.id); else window.FileV2.pauseTransfer(pub.id); }catch(e){} };
+        btns.appendChild(bP); }
+      const bC=document.createElement('button'); bC.setAttribute('data-act','cancel'); bC.textContent='Cancel';
+      bC.onclick=()=>{ try{ window.FileV2.cancelTransfer(pub.id); }catch(e){} };
+      btns.appendChild(bC);
+      const cf=document.createElement('span'); cf.className='t-conf'; cf.style.cssText='font-size:11px;color:var(--muted)'; btns.appendChild(cf);
+      el.appendChild(btns);
+      chatStream.appendChild(el); chatStream.scrollTop=chatStream.scrollHeight;
+    }
     const pct=Math.round((pub.progress||0)*100);
-    const status=pub.cancelled?'cancelled':pub.complete?(pub.role==='send'?'sent ✓ ('+pub.confirmations.length+' ack)':'complete ✓'):(pub.paused?'paused':'…');
-    el.innerHTML='';
-    const top=document.createElement('div'); top.className='t-top';
-    const nm=document.createElement('span'); nm.className='t-name'; nm.textContent=(pub.role==='send'?'↑ ':'↓ ')+pub.name;
-    const pc=document.createElement('span'); pc.textContent=pct+'% • '+status; top.appendChild(nm); top.appendChild(pc); el.appendChild(top);
-    const bar=document.createElement('div'); bar.className='progress'; const fill=document.createElement('div'); fill.style.width=pct+'%'; bar.appendChild(fill); el.appendChild(bar);
-    const meta=document.createElement('div'); meta.className='t-meta';
-    meta.textContent=fmtBytes(pub.ackedBytes||0)+' / '+fmtBytes(pub.size)+' • '+(pub.speedMBs||0).toFixed(2)+' MB/s • ETA '+fmtETA(pub.etaSec)+' • cwnd '+pub.cwnd+(pub.hash?(' • ⛨ '+(pub.hash||'').slice(0,10)+'…'):'');
-    el.appendChild(meta);
-    const btns=document.createElement('div'); btns.className='t-btns';
-    if(pub.role==='send'){ const bP=document.createElement('button'); bP.textContent=pub.paused?'Resume':'Pause'; bP.onclick=()=>{ pub.paused?window.FileV2.resumeTransfer(pub.id):window.FileV2.pauseTransfer(pub.id); }; btns.appendChild(bP); }
-    const bC=document.createElement('button'); bC.textContent='Cancel'; bC.onclick=()=>window.FileV2.cancelTransfer(pub.id);
-    btns.appendChild(bC);
-    if(pub.complete&&pub.role==='recv'&&pub.url){ const bD=document.createElement('button'); bD.textContent='⬇ Download'; bD.className='primary'; bD.onclick=()=>window.FileV2.download(pub.id); btns.appendChild(bD); }
-    if(pub.confirmations&&pub.confirmations.length){ const s=document.createElement('span'); s.style.cssText='font-size:11px;color:var(--muted)'; s.textContent='✓ '+pub.confirmations.length+' peer(s) confirmed'; btns.appendChild(s); }
-    el.appendChild(btns);
+    const status=pub.cancelled?'cancelled':(pub.paused?'paused':'…');
+    el.querySelector('.t-name').textContent=(pub.role==='send'?'↑ ':'↓ ')+pub.name;
+    el.querySelector('.t-stat').textContent=pct+'% • '+status;
+    el.querySelector('.t-fill').style.width=pct+'%';
+    el.querySelector('.t-meta').textContent=fmtBytes(pub.ackedBytes||0)+' / '+fmtBytes(pub.size)+' • '+(pub.speedMBs||0).toFixed(2)+' MB/s • ETA '+fmtETA(pub.etaSec)+' • cwnd '+pub.cwnd+(pub.hash?(' • ⛨ '+(pub.hash||'').slice(0,10)+'…'):'');
+    const bP=el.querySelector('[data-act="pause"]'); if(bP) bP.textContent=pub.paused?'Resume':'Pause';
+    const bC=el.querySelector('[data-act="cancel"]'); if(bC) bC.disabled=!!pub.cancelled;
+    el.querySelector('.t-conf').textContent=(pub.confirmations&&pub.confirmations.length)?('✓ '+pub.confirmations.length+' peer(s) confirmed'):'';
   },
   postFileMessage(pub){
     const UI=window.FileUI;
@@ -856,7 +868,7 @@ $('#btnScreen').addEventListener('click',async e=>{
   }catch(err){ toast('Screen share cancelled'); }
 });
 window.addEventListener('smc-open',()=>{ renderPeers(); try{ if(window.Media&&window.Media.local){ window.Media.local.getAudioTracks().forEach(t=>{ try{ t.enabled=true; }catch(e){} }); const mb=$('#btnMic'); if(mb){ mb.classList.remove('off'); mb.textContent='🎙️'; } } }catch(e){} });
-addMsg({sys:true,text:'🚀 Super Mesh Chat v2.6 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
+addMsg({sys:true,text:'🚀 Super Mesh Chat v2.8 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
 renderPeers();
 /* startup: ask for camera + mic permission right away */
 try{ if(window.Media&&window.Media.ensureLocal) window.Media.ensureLocal(); }catch(e){}
