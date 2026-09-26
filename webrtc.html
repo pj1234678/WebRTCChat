@@ -161,6 +161,8 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
   #chatStream .transfer{max-width:92%}
   #toolbar{gap:6px}
   .tgl{width:38px;height:38px;font-size:15px}
+  #msgInput{min-width:0}
+  #btnSend{flex-shrink:0;white-space:nowrap}
 }
 </style>
 </head>
@@ -175,7 +177,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     </form>
     <div class="side-h"><span>Peers — <span id="peerCountSide">0</span></span><span>mesh</span></div>
     <div id="peerList"></div>
-    <div class="self-note">v2.9 • Drag right edge to resize • &lt;900px becomes drawer</div>
+    <div class="self-note">v3.0 • Drag right edge to resize • &lt;900px becomes drawer</div>
     <details id="diagBox"><summary>Diagnostics</summary><div id="diagLines">not joined yet</div></details>
     <div id="dragEdge" title="Resize"></div>
   </aside>
@@ -776,9 +778,7 @@ window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new
         if(!vt) return s;
         s.addTrack(vt); this.syncOutgoing();
         // Existing calls were placed audio-only (no video sender): re-dial so video flows.
-        const redial=[];
-        Object.values(this.calls).forEach(c=>{ try{ const hasV=c.peerConnection&&c.peerConnection.getSenders().some(x=>x.track&&x.track.kind==='video'); if(!hasV) redial.push(c.peer); }catch(e){ try{ redial.push(c.peer); }catch(_){} } });
-        redial.forEach(pid=>{ try{ const old=this.calls[pid]; delete this.calls[pid]; try{ old&&old.close(); }catch(e){} }catch(e){} try{ this.callPeer(pid); }catch(e){} });
+        try{ this.redialWithVideo(); }catch(e){}
       }catch(e){ toast('No camera found'); return s; }
     }
     return s;
@@ -795,6 +795,15 @@ window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new
       const haveA=new Set(out.getAudioTracks());
       if(this.local) this.local.getAudioTracks().forEach(t=>{ if(!haveA.has(t)){ try{ out.addTrack(t); }catch(e){} } });
     }catch(e){}
+  },
+  redialWithVideo(){
+    // Re-place calls that cannot carry video (placed while audio-only). Delayed so closes propagate first.
+    let ids=[];
+    try{ Object.values(this.calls).forEach(c=>{ try{ const hasV=c.peerConnection&&c.peerConnection.getSenders().some(x=>x.track&&x.track.kind==='video'); if(!hasV&&c.peer) ids.push(c.peer); }catch(e){} }); }catch(e){}
+    ids=ids.filter((v,i)=>ids.indexOf(v)===i);
+    if(!ids.length) return;
+    ids.forEach(pid=>{ try{ const old=this.calls[pid]; delete this.calls[pid]; try{ old&&old.close(); }catch(e){} }catch(e){} });
+    setTimeout(()=>{ try{ ids.forEach(pid=>{ try{ this.callPeer(pid); }catch(e){} }); }catch(e){} },600);
   },
   dialAll(){ try{ const recs=window.Search?[...window.Search.peers.values()]:[]; recs.forEach(r=>{ if(!r.pending&&r.conn&&r.conn.open) this.callPeer(r.id); }); }catch(e){} },
   refreshLocalCard(){
@@ -853,14 +862,22 @@ window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new
     const peer=window.Search?window.Search.peer:null; if(!peer||typeof peer.call!=='function') return;
     const out=this.outgoing||this.local; if(!out) return;
     if(this.calls[pid]||pid===window.Search.myId) return;
-    try{ const call=peer.call(pid,out); this.calls[pid]=call;
+    try{ const call=peer.call(pid,out); call._outgoing=true; call._placedAt=Date.now(); this.calls[pid]=call;
       call.on('stream',s=>{ this.addVideo(pid,s,false,(window.Search.peers.get(pid)||{}).name||pid.slice(0,6)); playJoin(); });
       call.on('close',()=>this.removeVideo(pid)); call.on('error',()=>this.removeVideo(pid));
     }catch(e){}
   },
   onIncomingCall(call){
     const self=this;
-    (async()=>{ await self.ensureLocal(); self.syncOutgoing(); const out=self.outgoing||self.local; if(!out) return; try{ call.answer(out); }catch(e){ return; }
+    (async()=>{ await self.ensureLocal(); self.syncOutgoing(); const out=self.outgoing||self.local; if(!out) return;
+      const existing=self.calls[call.peer];
+      if(existing){
+        const myId=window.Search&&window.Search.myId;
+        if(existing._outgoing&&myId&&call.peer<myId){ try{ call.close(); }catch(e){} return; } // higher id keeps its outgoing: deterministic, no race
+        try{ delete self.calls[call.peer]; try{ existing.close(); }catch(e){} }catch(e){}
+      }
+      self.calls[call.peer]=call;
+      try{ call.answer(out); }catch(e){ try{ delete self.calls[call.peer]; }catch(_){} return; }
       call.on('stream',s=>{ self.addVideo(call.peer,s,false,(window.Search.peers.get(call.peer)||{}).name||call.peer.slice(0,6)); playJoin(); });
       call.on('close',()=>self.removeVideo(call.peer));
     })();
@@ -879,13 +896,14 @@ $('#btnScreen').addEventListener('click',async e=>{
     const ds=await navigator.mediaDevices.getDisplayMedia({video:true}); M.screen=ds; M.syncOutgoing(); const st=ds.getVideoTracks()[0];
     const redial=[];
     Object.values(M.calls).forEach(c=>{ try{ const snd=c.peerConnection&&c.peerConnection.getSenders().find(s=>s.track&&s.track.kind==='video'); if(snd&&st) snd.replaceTrack(st); else redial.push(c.peer); }catch(_){ try{redial.push(c.peer);}catch(e){} } });
-    redial.forEach(pid=>{ try{ const old=M.calls[pid]; delete M.calls[pid]; try{ old&&old.close(); }catch(e){} }catch(e){} try{ M.callPeer(pid); }catch(e){} });
+    redial.forEach(pid=>{ try{ const old=M.calls[pid]; delete M.calls[pid]; try{ old&&old.close(); }catch(e){} }catch(e){} });
+    if(redial.length) setTimeout(()=>{ try{ redial.forEach(pid=>{ try{ M.callPeer(pid); }catch(e){} }); }catch(e){} },600);
     try{window.Search.broadcast({t:'signal',kind:'screen-start'});}catch(_){}
     st.onended=()=>b.click(); b.classList.add('live'); b.textContent='⏹️'; try{M.refreshLocalCard();}catch(_){}
   }catch(err){ toast('Screen share cancelled'); }
 });
 window.addEventListener('smc-open',()=>{ renderPeers(); try{ if(window.Media&&window.Media.local){ window.Media.local.getAudioTracks().forEach(t=>{ try{ t.enabled=true; }catch(e){} }); const mb=$('#btnMic'); if(mb){ mb.classList.remove('off'); mb.textContent='🎙️'; } } }catch(e){} });
-addMsg({sys:true,text:'🚀 Super Mesh Chat v2.9 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
+addMsg({sys:true,text:'🚀 Super Mesh Chat v3.0 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
 renderPeers();
 /* startup: ask for camera + mic permission right away */
 try{ if(window.Media&&window.Media.ensureLocal) window.Media.ensureLocal(); }catch(e){}
