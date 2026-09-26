@@ -285,8 +285,9 @@ function wireRoomBox(){
     function doJoin(){ const v=(rp?rp.value:''); if(!String(v).trim()){ toast('Type a room password first'); return; } try{ bj.disabled=true; }catch(e){} try{ joinRoom(v); } finally { setTimeout(()=>{ try{bj.disabled=false;}catch(e){} },1200); } }
   }catch(e){}
 }
-function tryHost(){ isHost=true; let p; try{ p=new Peer(ROOM_ID,{debug:1}); }catch(e){ return fallbackClient(); } attachPeer(p,true); }
-function fallbackClient(){ isHost=false; let p; try{ p=new Peer({debug:1}); }catch(e){ showErr('Peer construction failed'); return; } attachPeer(p,false); }
+const ICE_CONFIG={ config:{ iceServers:[ { urls:'stun:stun.cloudflare.com:3478' }, { urls:'stun:stun.l.google.com:19302' }, { urls:'stun:stun1.l.google.com:19302' } ] } };
+function tryHost(){ isHost=true; let p; try{ p=new Peer(ROOM_ID,{debug:1,...ICE_CONFIG}); }catch(e){ return fallbackClient(); } attachPeer(p,true); }
+function fallbackClient(){ isHost=false; let p; try{ p=new Peer({debug:1,...ICE_CONFIG}); }catch(e){ showErr('Peer construction failed'); return; } attachPeer(p,false); }
 function attachPeer(p,hostMode){
   peer=p;
   const myEpoch=++epoch;
