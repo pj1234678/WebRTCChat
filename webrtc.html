@@ -1,0 +1,2412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>High-Fidelity WebRTC Conference</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="peerjs.min.js" onerror="if(!window.__peerFallback){window.__peerFallback=1;var s=document.createElement('script');s.src='https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';s.onerror=function(){var o=document.getElementById('online-users');if(o)o.innerText='❌ Could not load PeerJS library';};document.head.appendChild(s);}"></script>
+    <style>
+        /* Using 100dvh fixes the mobile browser address bar covering the bottom */
+        body { font-family: 'Inter', sans-serif; background: #111214; color: #f2f3f5; display: flex; height: 100vh; height: 100dvh; margin: 0; overflow: hidden; }
+        
+        /* Removed native 'resize', adjusted sidebar layout slightly */
+        .sidebar { width: 380px; min-width: 240px; max-width: 50vw; box-sizing: border-box; background: #1e1f22; border-right: 1px solid #2b2d31; display: flex; flex-direction: column; padding: 20px; position: relative; flex-shrink: 0; }
+        
+        /* New custom resizer edge */
+        .sidebar-resizer { width: 9px; cursor: col-resize; position: absolute; right: -2px; top: 0; bottom: 0; z-index: 100; transition: background 0.2s, width 0.2s; }
+        .sidebar-resizer:hover, .sidebar-resizer.active { background: #1a73e8; width: 10px; right: -2px; }
+
+        .main-area { flex: 1; display: flex; flex-direction: column; height: 100%; background: #111214; position: relative; min-width: 0; }
+        
+        /* Z-index increased to 2000 so it sits firmly above the mobile hamburger button */
+        #login-screen { position: absolute; inset: 0; background: rgba(17,18,20,0.95); backdrop-filter: blur(10px); z-index: 2000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #login-screen h1 { font-weight: 600; margin-bottom: 5px; }
+        #login-screen input { font-family: 'Inter', sans-serif; padding: 14px; border-radius: 10px; border: 1px solid #383a40; background: #1e1f22; color: white; outline: none; margin-bottom: 12px; width: 220px; text-align: center; font-size: 15px; transition: 0.2s; }
+        #login-screen input:focus { border-color: #1a73e8; }
+        
+        button { font-family: 'Inter', sans-serif; border: none; background: #1a73e8; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; transition: 0.2s; padding: 14px 28px; border-radius: 10px; }
+        button:hover { background: #1557b0; transform: translateY(-1px); }
+        button:active { transform: scale(0.98); }
+
+        .sidebar h3 { font-weight: 600; font-size: 14px; text-transform: uppercase; color: #80848e; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
+        .sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 12px; }
+        #logout-btn { background: #da373c; padding: 10px; width: 100%; font-size: 14px; border-radius: 8px; }
+        #logout-btn:hover { background: #a1282c; }
+
+        #video-grid { display: flex; flex-wrap: wrap; gap: 15px; padding: 20px 20px 0 20px; overflow-y: auto; max-height: 40vh; }
+        .screen-video { width: 220px; height: 220px; aspect-ratio: 1 / 1; object-fit: cover; background: #000; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); border: 1px solid #2b2d31; cursor: pointer; transition: 0.2s; }
+        .screen-video:hover { border-color: #dbdee1; transform: scale(1.02); }
+
+        #messages { flex: 1; overflow-y: auto; padding: 25px; display: flex; flex-direction: column; gap: 16px; scroll-behavior: smooth; z-index: 2; }
+        .msg { max-width: 70%; padding: 12px 18px; border-radius: 20px; font-size: 15px; line-height: 1.5; word-break: break-word; animation: fadeIn 0.3s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .msg.mine { align-self: flex-end; background: #1a73e8; border-bottom-right-radius: 4px; }
+        .msg.theirs { align-self: flex-start; background: #2b2d31; border-bottom-left-radius: 4px; border: 1px solid #383a40; }
+        
+        .msg img, .msg video { display: block; max-width: 260px; max-height: 200px; object-fit: cover; border-radius: 12px; margin-top: 8px; transition: 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .msg video { background: #000; outline: none; }
+        .msg audio { display: block; max-width: 260px; outline: none; margin-top: 8px; height: 40px; }
+        .msg img { cursor: pointer; } 
+        .msg img:hover, .msg video:hover { transform: scale(1.02); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+        
+        :fullscreen { max-width: 100vw !important; max-height: 100vh !important; width: 100% !important; height: 100% !important; object-fit: contain !important; background: #000; border-radius: 0 !important; }
+        :-webkit-full-screen { max-width: 100vw !important; max-height: 100vh !important; width: 100% !important; height: 100% !important; object-fit: contain !important; background: #000; border-radius: 0 !important; }
+
+        .progress-container { width: 100%; height: 6px; background: rgba(0,0,0,0.3); border-radius: 4px; overflow: hidden; margin-top: 10px; border: 1px solid rgba(255,255,255,0.1); }
+        .progress-bar { height: 100%; background: #23a559; width: 0%; transition: width 0.1s linear; }
+
+        .tx-btn { font-family: 'Inter', sans-serif; border: none; background: #4f545c; color: white; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: 0.2s; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; height: 28px; outline: none; }
+        .tx-btn:hover { background: #686d73; transform: translateY(-1px); }
+        .tx-btn:active { transform: scale(0.95); }
+        .tx-btn-danger { background: #da373c; }
+        .tx-btn-danger:hover { background: #a1282c; }
+
+        .chat-media-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 8px 12px; border-radius: 8px; background: rgba(255, 255, 255, 0.15); color: #fff !important; text-decoration: none; font-size: 13px; font-weight: 600; transition: 0.2s; }
+        .chat-media-link:hover { background: rgba(255, 255, 255, 0.25); transform: translateY(-1px); }
+        .chat-media-link:active { transform: scale(0.98); }
+        .msg.theirs .chat-media-link { background: #1e1f22; color: #dbdee1 !important; border: 1px solid #383a40; }
+        .msg.theirs .chat-media-link:hover { background: #313338; color: #fff !important; }
+
+        .msg-info { font-size: 12px; font-weight: 500; margin-bottom: 6px; }
+        .msg.mine .msg-info { color: #8ab4f8; } .msg.theirs .msg-info { color: #949ba4; }
+        .msg a { color: inherit; font-weight: 500; }
+
+        #typing-indicator { font-size: 13px; color: #949ba4; font-style: italic; padding: 0 25px 10px 25px; min-height: 20px; opacity: 0; transition: opacity 0.3s ease; font-weight: 500; text-align: center; }
+        #typing-indicator.active { opacity: 1; }
+
+        .input-bar { padding: 15px 20px; background: #1e1f22; display: flex; gap: 12px; border-top: 1px solid #2b2d31; align-items: center; z-index: 5; }
+        #msg-input { flex: 1; font-family: 'Inter', sans-serif; font-size: 15px; padding: 0 20px; height: 46px; border-radius: 24px; border: 1px solid #383a40; background: #2b2d31; color: #dbdee1; outline: none; transition: 0.2s; }
+        #msg-input:focus { background: #313338; border-color: #dbdee1; }
+        
+        .media-btn { background: #2b2d31; color: #dbdee1; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; font-size: 20px; border-radius: 50%; border: none; cursor: pointer; transition: 0.2s; padding: 0; line-height: 1; }
+        .media-btn:hover, .media-btn.highlight-hover:hover { background: #383a40; color: #fff; box-shadow: none; }
+        .media-btn.active { background: #383a40; color: #fff; box-shadow: inset 0 2px 6px rgba(0,0,0,0.4); } 
+        #send-btn { border-radius: 24px; height: 46px; padding: 0 24px; }
+
+        .user-item { padding: 12px 14px; background: #2b2d31; margin-bottom: 6px; border-radius: 8px; font-size: 14px; font-weight: 500; display: flex; align-items: center; justify-content: space-between; border: 1px solid transparent; transition: 0.2s; }
+        .user-item:hover { border-color: #383a40; background: #313338; }
+        .user-left { display: flex; align-items: center; gap: 10px; flex: 1; overflow: hidden; white-space: nowrap; color: #dbdee1; }
+        
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; transition: 0.3s ease; }
+        .dot-good { background: #23a559; box-shadow: 0 0 8px rgba(35,165,89,0.4); }
+        .dot-med { background: #f0b232; box-shadow: 0 0 8px rgba(240,178,50,0.4); }
+        .dot-bad { background: #da373c; box-shadow: 0 0 8px rgba(218,55,60,0.4); }
+        
+        .vol-slider { -webkit-appearance: none; width: 65px; height: 3px; background: #4f545c; border-radius: 3px; outline: none; cursor: pointer; transition: 0.2s; }
+        .vol-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #dbdee1; transition: 0.1s; }
+        .vol-slider::-webkit-slider-thumb:hover { transform: scale(1.2); background: #fff; }
+        
+        .ping-display { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; font-family: monospace; white-space: nowrap; }
+        .ping-good { color: #23a559; } .ping-med { color: #f0b232; } .ping-bad { color: #da373c; }
+
+        #searching-container { padding: 20px; text-align: center; color: #949ba4; font-size: 13px; font-weight: 500; display: none; flex-direction: column; align-items: center; gap: 15px; }
+        .radar { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.1); position: relative; }
+        .radar::after { content: ''; position: absolute; inset: 50%; transform: translate(-50%,-50%); width: 12px; height: 12px; background: #fff; border-radius: 50%; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,0.7); } 70% { box-shadow: 0 0 0 20px rgba(255,255,255,0); } 100% { box-shadow: 0 0 0 0 transparent; } }
+
+        #drop-overlay { display: none; position: absolute; inset: 0; background: rgba(26, 115, 232, 0.15); border: 3px dashed #1a73e8; z-index: 1000; align-items: center; justify-content: center; flex-direction: column; color: #1a73e8; font-size: 20px; font-weight: 600; pointer-events: none; backdrop-filter: blur(3px); margin: 15px; border-radius: 16px; }
+
+        #cursor-fx { position: fixed; inset: 0; pointer-events: none; z-index: 99999; overflow: hidden; }
+        .fx-part { position: absolute; pointer-events: none; will-change: transform, opacity; font-size: 16px; user-select: none; }
+        @keyframes fxFade { 0% { opacity: 0.8; transform: scale(1); } 100% { opacity: 0; transform: scale(0.2); } }
+        @keyframes fxFall { 0% { opacity: 1; transform: translateY(0) rotate(0deg); } 100% { opacity: 0; transform: translateY(40px) rotate(180deg); } }
+        @keyframes fxFloat { 0% { opacity: 0.7; transform: translateY(0) scale(1); } 100% { opacity: 0; transform: translateY(-40px) scale(1.5); } }
+
+        /* Mobile Overlay & Hamburger (Hidden on Desktop) */
+        #mobile-overlay { display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.6); z-index: 80; backdrop-filter: blur(2px); }
+        #mobile-overlay.active { display: block; }
+        
+        #hamburger-btn { display: none; position: absolute; top: 12px; left: 15px; background: #1e1f22; border: 1px solid #383a40; color: #dbdee1; padding: 8px 12px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; z-index: 50; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+        #hamburger-btn:active { transform: scale(0.95); }
+
+        /* Mobile Responsiveness */
+        @media (max-width: 768px) {
+            body { flex-direction: row; }
+            
+            #hamburger-btn { display: block; }
+            
+            /* Slide sidebar off-screen by default */
+            .sidebar { 
+                position: absolute; 
+                top: 0; bottom: 0; left: -100%; 
+                width: 280px !important; 
+                max-width: 80vw; 
+                height: 100vh;
+                height: 100dvh;
+                z-index: 100; 
+                transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+                box-shadow: 5px 0 25px rgba(0,0,0,0.7);
+            }
+            .sidebar.open { left: 0; }
+            .sidebar-resizer { display: none; }
+            
+            /* Push messages down so they aren't hidden by the hamburger button */
+            #messages { padding-top: 60px; }
+
+            /* Fix input bar width and force Send button to stay next to input */
+            .input-bar { 
+                box-sizing: border-box; 
+                width: 100%; 
+                flex-wrap: wrap; 
+                padding: 12px; 
+                gap: 10px; 
+            }
+            #msg-input { 
+                box-sizing: border-box;
+                order: 1; 
+                /* Calculates exactly 100% minus the gap (10px) and send button (80px) */
+                flex: 0 0 calc(100% - 90px); 
+                min-width: 0; 
+                height: 44px;
+            }
+            #send-btn { 
+                box-sizing: border-box;
+                order: 2; 
+                flex: 0 0 80px; 
+                height: 44px; 
+                padding: 0; 
+            }
+            /* Push media tools to the row underneath the text box */
+            .media-btn { 
+                order: 3; 
+                width: 44px; 
+                height: 44px; 
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="cursor-fx"></div>
+
+    <div id="login-screen">
+        <h1>🚀 Super Mesh Chat</h1>
+        <p style="color:#949ba4; margin-top: 0; margin-bottom: 5px; font-weight: 500;">Multi-User Conference Room</p>
+        <p id="online-users" style="color:#23a559; font-size: 13px; font-weight: 600; margin-top: 0; margin-bottom: 25px;">Checking room status...</p>
+        <input type="text" id="username" placeholder="Your Name">
+        <input type="password" id="room-pass" placeholder="Room Password">
+        <button id="join-btn">Join Room</button>
+    </div>
+
+    <div class="sidebar">
+        <div class="sidebar-resizer" id="resizer"></div>
+        
+        <h3>
+            <span>👥 Super Mesh Chat</span>
+            <span id="room-clock" style="font-size: 11px; color: #fff; display: none; text-align: right; line-height: 1.3; text-transform: none;"></span>
+        </h3>
+        <div id="user-list"></div>
+        <div id="searching-container">
+            <div class="radar"></div>
+            <div>Waiting for peers...<br><span style="font-size:11px; opacity:0.7;">Share password to invite</span></div>
+        </div>
+        <div class="sidebar-footer">
+            <div style="color: #949ba4; font-size: 12px; font-weight: 500; text-align: center; background: #111214; padding: 8px; border-radius: 8px;">Network: <span id="conn-status" style="color: #f0b232;">Connecting...</span></div>
+            <button id="logout-btn">Leave Room</button>
+        </div>
+    </div>
+
+    <div class="main-area">
+        <div id="mobile-overlay" onclick="toggleSidebar()"></div> 
+        <button id="hamburger-btn" onclick="toggleSidebar()">☰ Users</button> 
+
+        <div id="drop-overlay">
+            <div style="font-size: 48px; margin-bottom: 12px;">📥</div>
+            Drop to Share or Play
+        </div>
+        
+        <div id="video-grid"></div>
+        <div id="messages"></div>
+        
+        <div id="typing-indicator"></div>
+        
+        <div class="input-bar">
+            <button id="cursor-btn" class="media-btn" title="Cursor Effects">✨</button>
+            <button id="cam-btn" class="media-btn" title="Toggle Webcam">📷</button>
+            <button id="screen-btn" class="media-btn" title="Share Screen">🖥️</button>
+            
+            <input type="file" id="soundboard-input" accept="audio/*" style="display: none;">
+            <label for="soundboard-input" class="media-btn highlight-hover" title="Soundboard">🎵</label>
+            
+            <input type="file" id="file-input" style="display: none;" multiple>
+            <label for="file-input" class="media-btn highlight-hover" title="Send File/Photo">📎</label>
+            
+            <input type="text" id="msg-input" placeholder="Type a message (or Drag/Paste files)..." disabled>
+            <button id="send-btn" disabled>Send</button>
+        </div>
+    </div>
+
+    <script>
+        const $ = id => document.getElementById(id);
+
+        // --- Prevent Accidental Close ---
+        window.addEventListener('beforeunload', (e) => {
+            // Only warn if they are inside the room (login screen is hidden)
+            if ($('login-screen').style.display === 'none') {
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        });
+
+        function formatBytes(bytes, decimals = 1) {
+            if (!+bytes) return '0 Bytes';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+        }
+
+        function fmtETA(sec) {
+            if (!isFinite(sec) || sec < 0) return '—';
+            sec = Math.round(sec);
+            if (sec < 60) return sec + 's';
+            const m = Math.floor(sec / 60);
+            if (m < 60) return m + ':' + String(sec % 60).padStart(2, '0');
+            return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+        }
+
+        // --- Screen Wake Lock API ---
+        let wakeLock = null;
+        const requestWakeLock = async () => {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('Screen Wake Lock acquired');
+                }
+            } catch (err) {
+                console.warn('Wake Lock error:', err);
+            }
+        };
+
+        document.addEventListener('visibilitychange', () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') {
+                requestWakeLock();
+            }
+        });
+
+        // --- Mobile Sidebar Toggle ---
+        window.toggleSidebar = () => {
+            document.querySelector('.sidebar').classList.toggle('open');
+            document.getElementById('mobile-overlay').classList.toggle('active');
+        };
+
+        // --- Custom Edge Resizer Logic ---
+        const sidebar = document.querySelector('.sidebar');
+        const resizer = $('resizer');
+        let isResizing = false;
+
+        resizer.addEventListener('mousedown', () => {
+            isResizing = true;
+            document.body.style.userSelect = 'none'; // Prevent text highlighting during drag
+            resizer.classList.add('active');
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+            // The sidebar CSS contains the min-width and max-width boundaries
+            sidebar.style.width = `${e.clientX}px`;
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizing) {
+                isResizing = false;
+                document.body.style.userSelect = '';
+                resizer.classList.remove('active');
+            }
+        });
+        // ---------------------------------
+
+        const playBeep = (freq, type) => { try { const ctx=new(window.AudioContext||window.webkitAudioContext)({ latencyHint: 'interactive' }),osc=ctx.createOscillator(),g=ctx.createGain();osc.type=type;osc.frequency.value=freq;g.gain.setValueAtTime(0.05,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.3);osc.connect(g);g.connect(ctx.destination);osc.start();osc.stop(ctx.currentTime+0.3); } catch(e){} };
+        const playJoinSound = () => playBeep(880, 'sine'), playLeaveSound = () => playBeep(440, 'triangle'); 
+
+        function mungeSDP(sdp) {
+            const match = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i);
+            if (match) {
+                const pt = match[1];
+                const fmtpRegex = new RegExp(`(a=fmtp:${pt} .*)`);
+                if (fmtpRegex.test(sdp)) {
+                    return sdp.replace(fmtpRegex, `$1;useinbandfec=1;usedtx=1`);
+                } else {
+                    return sdp.replace(new RegExp(`(a=rtpmap:${pt} opus\\/48000\\/2\\r\\n)`, 'i'), `$1a=fmtp:${pt} useinbandfec=1;usedtx=1\r\n`);
+                }
+            }
+            return sdp;
+        }
+
+        // === FileV2: durable transfer constants ===
+        // 64KB chunks halve message/ACK overhead vs 32KB. Per-chunk CRC32 + timeout
+        // resend cover the coarser retransmit granularity.
+        // Bandwidth control is TCP-style per peer: slow-start, additive growth while
+        // clean, instant halve on loss. Static ceilings never adapt to the link.
+        const FILE_V2_CHUNK = 65536;
+        const FILE_V2_ACK_TIMEOUT = 1500;
+        const FILE_V2_MAX_CHUNK_MSG = 120; // cap missing-list per control msg
+        const F2_CWND_START = 262144;   // 256KB slow-start (never 0: always trickles)
+        const F2_CWND_MIN = 131072;     // 128KB floor under turbulence
+        const F2_CWND_MAX = 4194304;    // 4MB ceiling on clean fast links
+        const F2_CWND_SSTHRESH = 1048576; // below 1MB: double per window; above: +1/window
+        const F2_CAP_MIN = 262144;      // backpressure floor (always enforced)
+        const F2_CAP_MAX = 2097152;     // backpressure ceiling
+        const F2_CHUNK_CACHE = 96; // shared slice cache entries (~3MB at 32KB)
+        const makeTxId = () => 'v2-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+        // CRC32 (IEEE) over ArrayBuffer/Uint8Array. Sync, ~GB/s. Catches transport
+        // corruption per chunk; whole-file SHA-256 still verifies end-to-end.
+        const F2_CRC_TABLE = (() => {
+            const t = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                t[n] = c >>> 0;
+            }
+            return t;
+        })();
+        function f2Crc32(buf) {
+            const v = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+            let crc = 0xFFFFFFFF;
+            for (let i = 0; i < v.length; i++) crc = F2_CRC_TABLE[(crc ^ v[i]) & 0xFF] ^ (crc >>> 8);
+            return (crc ^ 0xFFFFFFFF) >>> 0;
+        }
+        // Shared read cache: all peers need the same slices in the same order.
+        // Avoids re-reading the same bytes from disk once per peer.
+        const f2ChunkCache = new Map(); // key txId:index -> ArrayBuffer
+        function f2CacheGet(txId, index) { try { return f2ChunkCache.get(txId + ':' + index) || null; } catch (e) { return null; } }
+        function f2CachePut(txId, index, buf) {
+            try {
+                f2ChunkCache.set(txId + ':' + index, buf);
+                while (f2ChunkCache.size > F2_CHUNK_CACHE) {
+                    const oldest = f2ChunkCache.keys().next().value;
+                    f2ChunkCache.delete(oldest);
+                }
+            } catch (e) {}
+        }
+        function f2CacheDrop(txId) {
+            try {
+                for (const k of Array.from(f2ChunkCache.keys())) {
+                    if (k === txId || k.indexOf(txId + ':') === 0) f2ChunkCache.delete(k);
+                }
+            } catch (e) {}
+        }
+
+        let myName = "", myId = "", peer, ROOM_ID = "superconf-mesh-secretpassword", localStream = null, isMuted = false;
+        let screenStream = null, screenCalls = {}, camStream = null, camCalls = {};
+        
+        const connections = {}, fileConns = {}, peerNames = {}, pendingConnections = new Set(), lastSeen = {}, activeSounds = {}, lastRealPing = {};const peerConfig = { config: { iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }, { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }] } };
+        // Reconnect state (fixes F1/F2/F3/F9): remembered peers, per-peer retry backoff, signalling watchdog.
+        const knownPeerIds = new Set(); // every peer id ever seen (mesh-sync, peer-list, direct) — never auto-cleared except leave
+        const retryCount = {}; // targetId -> consecutive failed attempts (backoff)
+        const audioCalls = {}; // peerId -> outgoing mic MediaConnection (F4/F5 healing)
+        let peerReconnectTimer = 0;
+
+        const dlIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+
+        const soundboard = {};
+        let waitingForKeyBind = null;
+        let amITyping = false;
+        let typingTimeout = null;
+        const typingUsers = new Set();
+        let tempPeer = null;
+
+        // ================= FileV2 durable transfer =================
+        // Per-peer independent sessions. One slow/dead peer never blocks others or later files.
+        const FileV2Out = {}; // txId -> sender Tx
+        const FileV2In = {};  // txId -> receiver Rx
+        const FileV2Order = []; // txIds in enqueue order (per-peer sequential)
+        const FileV2Tombstones = new Set();
+        const fileDialPending = new Set();
+
+        // All peers we should send files to = chat peers ∪ file peers (minus self).
+        function v2AllPeerIds() {
+            const s = new Set();
+            try {
+                for (const id of Object.keys(connections)) if (id !== myId) s.add(id);
+                for (const id of Object.keys(fileConns)) if (id !== myId) s.add(id);
+            } catch (e) {}
+            return Array.from(s);
+        }
+
+        // Dial a file-only channel when chat exists but the file channel is missing/dead.
+        // connectToPeer() can't do this (it early-returns when chat exists), hence separate.
+        function ensureFileConn(sid) {
+            if (!sid || sid === myId) return;
+            try {
+                const existing = fileConns[sid];
+                if (existing && existing.open) return;
+            } catch (e) {}
+            if (fileDialPending.has(sid)) return;
+            try { if (!peer || peer.destroyed) return; } catch (e) { return; }
+            fileDialPending.add(sid);
+            setTimeout(() => fileDialPending.delete(sid), 4000);
+            try {
+                const c = peer.connect(sid, { reliable: true, label: 'file' });
+                handleNewConnection(c);
+            } catch (e) { fileDialPending.delete(sid); }
+        }
+
+        // ---- F2 congestion control (TCP-style, per peer) ----
+        // cwnd = bytes allowed in flight. Slow-start below SSTHRESH, +1 chunk per
+        // clean window above it, halve on any loss signal, hard floor so it always
+        // trickles (never deadlocks), hard ceiling so it can't flood.
+        function f2CwndChunks(ps) {
+            try {
+                const c = Math.floor((ps.cwndBytes || F2_CWND_START) / FILE_V2_CHUNK);
+                return Math.min(Math.max(c, 2), 64);
+            } catch (e) { return 8; }
+        }
+        function f2CapFor(sid) {
+            let mx = 0;
+            try {
+                for (const txId of Object.keys(FileV2Out)) {
+                    const tx = FileV2Out[txId];
+                    const ps = tx && tx.peers[sid];
+                    if (ps && !ps.done && !ps.canceled && (ps.cwndBytes || 0) > mx) mx = ps.cwndBytes;
+                }
+            } catch (e) {}
+            if (!mx) mx = F2_CWND_START;
+            return Math.min(Math.max(2 * mx, F2_CAP_MIN), F2_CAP_MAX);
+        }
+        function f2ClearTimer(v) {
+            try {
+                const t = v && typeof v === 'object' ? v.timer : v;
+                if (t) clearTimeout(t);
+            } catch (e) {}
+        }
+        function f2Grow(ps, rttSample) {
+            try {
+                if (!ps || ps.done || ps.canceled) return;
+                if (typeof rttSample === 'number' && rttSample > 0) {
+                    ps.srtt = ps.srtt ? (ps.srtt * 0.875 + rttSample * 0.125) : rttSample;
+                }
+                // Hold growth briefly after turbulence so recovery completes first.
+                if (Date.now() - (ps.lastBackoff || 0) < 3000) return;
+                const win = Math.max(f2CwndChunks(ps), 1);
+                const step = ((ps.cwndBytes || F2_CWND_START) < F2_CWND_SSTHRESH) ? FILE_V2_CHUNK : (FILE_V2_CHUNK / win);
+                ps.cwndBytes = Math.min(((ps.cwndBytes || F2_CWND_START) + step), F2_CWND_MAX);
+            } catch (e) {}
+        }
+        function f2Shrink(ps) {
+            try {
+                if (!ps) return;
+                ps.cwndBytes = Math.max(Math.floor((ps.cwndBytes || F2_CWND_START) / 2), F2_CWND_MIN);
+                ps.lastBackoff = Date.now();
+            } catch (e) {}
+        }
+        // Writability checks BOTH layers (PeerJS internal queue + raw SCTP channel)
+        // against the ADAPTIVE cap for this peer: 2x its congestion window,
+        // bounded [256KB, 2MB]. Backpressure always exists; it just breathes.
+        function f2Writable(sid) {
+            const cap = f2CapFor(sid);
+            try {
+                const c = fileConns[sid];
+                if (!c || !c.open) return false;
+                try {
+                    const bs = c.bufferSize;
+                    if (typeof bs === 'number' && bs > cap) return false;
+                } catch (e) {}
+                try {
+                    const dc = c.dataChannel;
+                    if (dc) {
+                        if (dc.readyState && dc.readyState !== 'open') return false;
+                        if (typeof dc.bufferedAmount === 'number' && dc.bufferedAmount > cap) return false;
+                    }
+                } catch (e) {}
+                return true;
+            } catch (e) { return false; }
+        }
+
+        function safeFileSend(sid, msg) {
+            try {
+                const c = fileConns[sid];
+                if (!c || !c.open) return false;
+                c.send(msg);
+                return true;
+            } catch (e) { return false; }
+        }
+
+        // ============ F2 global scheduler ============
+        // ONE tick loop drives every (file x peer) session. There are no per-session
+        // while-await loops anywhere, so no session can ever park forever or starve
+        // another. Each tick a session may emit at most one chunk; ACKs clock progress.
+        let f2TickScheduled = false;
+        let f2RoundRobin = 0;
+        function f2Kick() {
+            if (f2TickScheduled) return;
+            f2TickScheduled = true;
+            setTimeout(() => { f2TickScheduled = false; try { f2Schedule(); } catch (e) {} }, 0);
+        }
+        setInterval(() => { try { f2Schedule(); } catch (e) {} }, 10);
+
+        function f2PickNext(tx, ps) {
+            while (ps.resend.length) {
+                const cand = ps.resend.shift();
+                if (!ps.acked.has(cand) && !ps.inflight.has(cand)) return cand;
+            }
+            while (ps.next < tx.totalChunks && (ps.acked.has(ps.next) || ps.inflight.has(ps.next))) ps.next++;
+            if (ps.next < tx.totalChunks) return ps.next++;
+            return null;
+        }
+
+        function f2Schedule() {
+            const now = Date.now();
+            const sessions = [];
+            for (const txId of FileV2Order) {
+                const tx = FileV2Out[txId];
+                if (!tx || tx.canceled || tx.done || tx.paused) continue;
+                try {
+                    for (const sid of Object.keys(tx.peers)) sessions.push([tx, sid]);
+                } catch (e) {}
+            }
+            if (!sessions.length) return;
+            f2RoundRobin = f2RoundRobin % sessions.length;
+            let sent = 0;
+            const MAX_PER_TICK = 24;
+            for (let n = 0; n < sessions.length && sent < MAX_PER_TICK; n++) {
+                const pair = sessions[(f2RoundRobin + n) % sessions.length];
+                const tx = pair[0], sid = pair[1];
+                const ps = tx.peers[sid];
+                if (!ps || ps.done || ps.canceled || ps.paused) continue;
+                if (v2EarlierPending(tx.txId, sid)) continue; // per-peer file order
+                const conn = fileConns[sid];
+                if (!conn || !conn.open) {
+                    if (ps.connected) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(tx.txId); }
+                    continue;
+                }
+                ps.connected = true;
+                if (now < (ps.backoffUntil || 0)) continue;
+                if (ps.inflight.size >= f2CwndChunks(ps)) continue; // ACK-clocked, adaptive
+                if (!f2Writable(sid)) continue; // backpressure: try next session
+                let idx = f2PickNext(tx, ps);
+                if (idx === null) {
+                    if (ps.inflight.size === 0) {
+                        if (ps.acked.size >= tx.totalChunks) { v2MarkPeerDone(tx.txId, sid); continue; }
+                        const missing = v2MissingFor(tx.txId, sid);
+                        if (missing.length) {
+                            for (const m of missing.slice(0, f2CwndChunks(ps))) if (!ps.resend.includes(m)) ps.resend.push(m);
+                            idx = f2PickNext(tx, ps);
+                            if (idx === null) continue;
+                        } else continue; // waiting on receiver sweep / late ACKs
+                    } else continue;
+                }
+                // Reserve the window slot synchronously (schedule loop is sync).
+                ps.inflight.set(idx, { timer: 0, sentAt: now });
+                sent++;
+                f2Transmit(tx.txId, sid, idx);
+            }
+            f2RoundRobin = (f2RoundRobin + Math.max(sent, 1)) % sessions.length;
+        }
+
+        function v2EarlierPending(txId, sid) {
+            const idx = FileV2Order.indexOf(txId);
+            if (idx <= 0) return false;
+            for (let i = 0; i < idx; i++) {
+                const earlier = FileV2Out[FileV2Order[i]];
+                if (!earlier || earlier.canceled) continue;
+                const ps = earlier.peers[sid];
+                if (ps && !ps.done && !ps.canceled) return true;
+            }
+            return false;
+        }
+
+        function v2MissingFor(txId, sid) {
+            const tx = FileV2Out[txId];
+            const ps = tx && tx.peers[sid];
+            if (!tx || !ps) return [];
+            const out = [];
+            for (let i = 0; i < tx.totalChunks; i++) {
+                if (!ps.acked.has(i) && !ps.inflight.has(i)) out.push(i);
+                if (out.length >= 200) break;
+            }
+            return out;
+        }
+
+        function v2UpdateSenderUI(txId, force) {
+            const tx = FileV2Out[txId];
+            if (!tx) return;
+            const now = Date.now();
+            // Button state must flip instantly on click — never throttle this.
+            // (Stats below update at most 4x/sec; during active transfer the
+            // throttle window is always fresh and would swallow the flip.)
+            try {
+                const pauseBtn = $(`pause-${txId}`);
+                if (pauseBtn && !tx.done) pauseBtn.innerHTML = tx.paused ? "▶️ Resume" : "⏸️ Pause";
+            } catch (e) {}
+            if (!force && now - (tx.uiThrottle || 0) < 250) return;
+            tx.uiThrottle = now;
+            // Active set excludes canceled peers: a cancel immediately shrinks both
+            // numerator and denominator, so % jumps up and the name drops off.
+            const activeIds = Object.keys(tx.peers).filter(sid => !tx.peers[sid].canceled);
+            let donePeers = 0, stalledPeers = 0, ackedTotal = 0;
+            for (const sid of activeIds) {
+                const ps = tx.peers[sid];
+                ackedTotal += Math.min(ps.acked.size, tx.totalChunks);
+                if (ps.done) donePeers++;
+                else if (ps.stalled || !ps.connected) stalledPeers++;
+            }
+            const denom = Math.max(tx.totalChunks * activeIds.length, 1);
+            const pct = Math.min((ackedTotal / denom) * 100, 100);
+            const bar = $(`bar-${txId}`);
+            if (bar) bar.style.width = `${pct}%`;
+            const stats = $(`stats-${txId}`);
+            if (stats) {
+                const total = activeIds.length;
+                // Live throughput: bytes newly ACKed in the trailing window.
+                // Decays to 0 on its own when paused/stalled; never freezes stale.
+                let speed = 0;
+                try {
+                    const log = tx.rateLog || (tx.rateLog = []);
+                    while (log.length && now - log[0].t > 3000) log.shift();
+                    let wsum = 0;
+                    for (const e of log) wsum += e.bytes;
+                    const span = log.length ? Math.min((now - log[0].t) / 1000, 3) : 0;
+                    speed = span > 0.2 ? wsum / span : 0;
+                } catch (e) { speed = 0; }
+                const remainingChunks = Math.max(denom - ackedTotal, 0);
+                const eta = speed > 0 ? (remainingChunks * FILE_V2_CHUNK) / speed : Infinity;
+                let extra = `${donePeers}/${total} peers, ${formatBytes(speed)}/s, ETA ${fmtETA(eta)}`;
+                if (stalledPeers) extra += `, ${stalledPeers} retrying`;
+                if (tx.paused) extra += `, paused`;
+                // Name who we're still waiting on, with each peer's own % (max 3).
+                try {
+                    const pending = activeIds.filter(sid => !tx.peers[sid].done)
+                        .map(sid => {
+                            const p = tx.totalChunks ? Math.min((tx.peers[sid].acked.size / tx.totalChunks) * 100, 100) : 100;
+                            return `${peerNames[sid] || sid.slice(0, 6)} (${p.toFixed(0)}%)`;
+                        });
+                    if (pending.length && donePeers < total) extra += ` — waiting: ${pending.slice(0, 3).join(', ')}${pending.length > 3 ? ` +${pending.length - 3}` : ''}`;
+                } catch (e) {}
+                stats.innerText = `(${pct.toFixed(1)}%, ${extra})`;
+            }
+        }
+
+        function v2MarkPeerDone(txId, sid) {
+            const tx = FileV2Out[txId];
+            if (!tx) return;
+            const ps = tx.peers[sid];
+            if (!ps || ps.done) return;
+            for (const t of ps.inflight.values()) { f2ClearTimer(t); }
+            ps.inflight.clear();
+            ps.resend.length = 0;
+            ps.done = true;
+            ps.stalled = false;
+            safeFileSend(sid, { type: 'file-v2-done', txId });
+            v2UpdateSenderUI(txId, true);
+            f2Kick(); // scheduler picks up next queued file for this peer (order kept)
+            v2MaybeFinishTx(txId);
+        }
+
+        function v2MaybeFinishTx(txId) {
+            const tx = FileV2Out[txId];
+            if (!tx || tx.done) return;
+            const peers = Object.values(tx.peers);
+            if (!peers.length) return;
+            if (peers.every(p => p.done || p.canceled)) {
+                tx.done = true;
+                const msgNode = $(`msg-${txId}`);
+                if (msgNode && !tx.canceled) {
+                    try {
+                        const url = URL.createObjectURL(tx.file);
+                        msgNode.remove();
+                        renderCompletedFile(url, tx.name, tx.mime || tx.file.type, "You", 'mine', true);
+                    } catch (e) {
+                        msgNode.innerHTML = `<div class="msg-info">You</div><div>✅ Shared: <b>${escapeHTML(tx.name)}</b> (all reachable peers done)</div>`;
+                    }
+                }
+                // Keep Tx 5 min to serve late joiners via hello, then GC (+ drop slice cache).
+                setTimeout(() => { f2CacheDrop(txId); delete FileV2Out[txId]; const i = FileV2Order.indexOf(txId); if (i >= 0) FileV2Order.splice(i, 1); }, 5 * 60 * 1000);
+            }
+            v2UpdateSenderUI(txId);
+        }
+
+        // Whole-file SHA-256 in background. Announce goes out immediately (usually
+        // before this finishes), so the hash is delivered afterwards via file-v2-hash
+        // and the receiver verifies it at completion. Always attempted: chunk CRCs
+        // protect per-chunk integrity even when this is skipped for huge files.
+        async function v2HashInBackground(tx) {
+            try {
+                if (!tx.file || tx.file.size > 300 * 1024 * 1024) return;
+                const buf = await tx.file.arrayBuffer();
+                if (tx.canceled) return;
+                const h = await crypto.subtle.digest('SHA-256', buf);
+                tx.fileHash = Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
+                tx.hashReady = true;
+                // Deliver late: receivers that already got the announce still verify.
+                try {
+                    for (const sid of Object.keys(tx.peers)) {
+                        const ps = tx.peers[sid];
+                        if (ps && !ps.done && !ps.canceled) safeFileSend(sid, { type: 'file-v2-hash', txId: tx.txId, fileHash: tx.fileHash });
+                    }
+                } catch (e) {}
+            } catch (e) { tx.fileHash = null; }
+        }
+
+        // One chunk transmit. Window slot must already be reserved (placeholder in
+        // ps.inflight) by the scheduler before calling. Never throws, never blocks.
+        async function f2Transmit(txId, sid, index) {
+            const tx = FileV2Out[txId];
+            const ps = tx && tx.peers[sid];
+            if (!tx || !ps || tx.canceled || ps.canceled || ps.done) return;
+            if (ps.acked.has(index)) { ps.inflight.delete(index); return; }
+            try {
+                let buf = f2CacheGet(txId, index);
+                if (!buf) {
+                    buf = await tx.file.slice(index * FILE_V2_CHUNK, Math.min((index + 1) * FILE_V2_CHUNK, tx.size)).arrayBuffer();
+                    f2CachePut(txId, index, buf);
+                }
+                if (tx.canceled || ps.canceled || ps.done) { ps.inflight.delete(index); return; }
+                if (!ps.inflight.has(index)) return; // cleared while reading
+                if (ps.acked.has(index)) { ps.inflight.delete(index); return; }
+                const h = f2Crc32(buf);
+                const ok = safeFileSend(sid, { type: 'file-v2-chunk', txId, index, h, data: buf });
+                if (!ok) throw new Error('send failed');
+                ps.failCount = 0;
+                ps.backoffUntil = 0;
+                if (ps.stalled && ps.inflight.size <= 2 && ps.resend.length === 0) { ps.stalled = false; v2UpdateSenderUI(txId); }
+                f2ClearTimer(ps.inflight.get(index));
+                ps.inflight.set(index, { timer: setTimeout(() => {
+                    try {
+                        const t2 = FileV2Out[txId];
+                        const p2 = t2 && t2.peers[sid];
+                        if (!t2 || !p2 || p2.done || p2.canceled || t2.canceled) return;
+                        p2.inflight.delete(index);
+                        if (!p2.acked.has(index)) {
+                            if (!p2.resend.includes(index)) p2.resend.push(index);
+                            f2Shrink(p2); // loss signal: halve window instantly, floor holds
+                            v2UpdateSenderUI(txId);
+                            f2Kick();
+                        }
+                    } catch (e) {}
+                }, FILE_V2_ACK_TIMEOUT), sentAt: Date.now() });
+            } catch (e) {
+                f2ClearTimer(ps.inflight.get(index));
+                try { ps.inflight.delete(index); } catch (e2) {}
+                if (!ps.acked.has(index) && !ps.resend.includes(index)) {
+                    try { ps.resend.unshift(index); } catch (e2) {}
+                }
+                ps.failCount = (ps.failCount || 0) + 1;
+                ps.backoffUntil = Date.now() + Math.min(500 * ps.failCount, 6000);
+                if (ps.failCount > 2) { ps.stalled = true; v2UpdateSenderUI(txId); }
+            }
+            f2Kick(); // keep the clock running while work remains
+        }
+
+        function v2NewPeerState() {
+            return { acked: new Set(), inflight: new Map(), resend: [], next: 0, done: false, canceled: false, paused: false, stalled: false, connected: true, failCount: 0, backoffUntil: 0, lastAck: Date.now(), lastAnnounce: 0, gotReady: false, cwndBytes: F2_CWND_START, srtt: 0, lastBackoff: 0 };
+        }
+
+        function v2AnnounceTo(sid, txId) {
+            const tx = FileV2Out[txId];
+            if (!tx || tx.canceled) return;
+            if (!tx.peers[sid]) tx.peers[sid] = v2NewPeerState();
+            const ps = tx.peers[sid];
+            if (ps.done || ps.canceled) return;
+            ps.lastAnnounce = Date.now();
+            safeFileSend(sid, { type: 'file-v2-announce', txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null });
+            f2Kick();
+        }
+
+        async function v2EnqueueFile(file) {
+            if (!file) return;
+            if (Object.keys(connections).length === 0) { addSystemMsg("❌ No one is in the room to receive files!"); return; }
+            const txId = makeTxId();
+            const totalChunks = Math.ceil(file.size / FILE_V2_CHUNK);
+            const tx = {
+                txId, file, name: file.name || (`Pasted Media - ${new Date().toLocaleTimeString()}`),
+                mime: file.type || 'application/octet-stream', size: file.size, totalChunks,
+                fileHash: null, hashReady: false, createdAt: Date.now(),
+                paused: false, canceled: false, done: false, peers: {}, startTime: Date.now(), uiThrottle: 0,
+                rateLog: [] // {t, bytes} of freshly ACKed chunks, trailing 3s -> live MB/s
+            };
+            FileV2Out[txId] = tx;
+            FileV2Order.push(txId);
+            if (totalChunks === 0) {
+                const progHtml = `<div>📤 Shared empty file <b>${escapeHTML(tx.name)}</b></div>`;
+                addMessage(progHtml, "You", 'mine', `msg-${txId}`);
+                tx.done = true;
+                return;
+            }
+            const progHtml = `
+            <div>📤 Uploading <b>${escapeHTML(tx.name)}</b> <span id="stats-${txId}" style="font-size:12px; color:#949ba4;">(starting...)</span></div>
+            <div class="progress-container"><div class="progress-bar" id="bar-${txId}"></div></div>
+            <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="tx-btn" id="pause-${txId}" onclick="window.toggleTx('${txId}')">⏸️ Pause</button>
+                <button class="tx-btn tx-btn-danger" onclick="window.cancelTx('${txId}')">❌ Cancel</button>
+            </div>`;
+            addMessage(progHtml, "You", 'mine', `msg-${txId}`);
+            // Announce to every peer independently; one failure can't block others.
+            // Targets = chat peers ∪ file peers (file channel may lag behind chat).
+            const targets = v2AllPeerIds();
+            const ready = targets.filter(sid => { try { return fileConns[sid] && fileConns[sid].open; } catch (e) { return false; } });
+            const missing = targets.filter(sid => ready.indexOf(sid) < 0);
+            for (const sid of missing) { try { ensureFileConn(sid); } catch (e) {} }
+            if (!ready.length) { addSystemMsg("❌ File channel not ready yet — will retry when peers connect. File queued."); }
+            for (const sid of ready) {
+                try { v2AnnounceTo(sid, txId); } catch (e) { console.warn('announce failed for', sid, e); }
+            }
+            v2UpdateSenderUI(txId);
+            v2HashInBackground(tx);
+        }
+
+        function renderCompletedFile(url, name, mime, senderName, kind, verified) {
+            const safeName = escapeHTML(name || 'file');
+            const badge = verified ? ` <span style="font-size:11px;color:#23a559;font-weight:600;">✓ hash verified</span>` : '';
+            const dl = (label) => `<a href="${url}" download="${safeName}" class="chat-media-link">${dlIcon} ${label}</a>${badge}`;
+            if ((mime || '').startsWith('image/')) addMessage(`<img src="${url}">${dl('Download Image')}`, senderName, kind);
+            else if ((mime || '').startsWith('video/')) addMessage(`<video src="${url}" controls preload="metadata"></video>${dl('Download Video')}`, senderName, kind);
+            else if ((mime || '').startsWith('audio/')) addMessage(`<audio src="${url}" controls></audio>${dl('Download Audio')}`, senderName, kind);
+            else addMessage(`<div>📂 ${safeName}</div>${dl('Download File')}`, senderName, kind);
+        }
+
+        window.toggleTx = (txId) => {
+            const tx = FileV2Out[txId];
+            if (!tx || tx.done) return;
+            tx.paused = !tx.paused;
+            for (const sid of Object.keys(tx.peers)) {
+                safeFileSend(sid, { type: 'file-v2-control', txId, action: tx.paused ? 'pause' : 'resume' });
+            }
+            if (!tx.paused) f2Kick();
+            v2UpdateSenderUI(txId);
+        };
+
+        window.cancelTx = (txId) => {
+            const tx = FileV2Out[txId];
+            if (!tx) return;
+            tx.canceled = true;
+            for (const sid of Object.keys(tx.peers)) {
+                const ps = tx.peers[sid];
+                ps.canceled = true;
+                for (const t of ps.inflight.values()) { f2ClearTimer(t); }
+                ps.inflight.clear();
+                safeFileSend(sid, { type: 'file-v2-control', txId, action: 'cancel' });
+            }
+            f2CacheDrop(txId);
+            const msgNode = $(`msg-${txId}`);
+            if (msgNode) msgNode.innerHTML = `<div class="msg-info">You</div><div style="color: #da373c;">❌ Upload Canceled</div>`;
+            setTimeout(() => { delete FileV2Out[txId]; const i = FileV2Order.indexOf(txId); if (i >= 0) FileV2Order.splice(i, 1); }, 30000);
+        };
+
+        // ================= FileV2 receiver =================
+        function v2UpdateRxUI(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done) return;
+            const now = Date.now();
+            if (now - (rx.uiThrottle || 0) < 300) return;
+            rx.uiThrottle = now;
+            const pct = rx.totalChunks ? Math.min((rx.written.size / rx.totalChunks) * 100, 100) : 100;
+            const bar = $(`bar-rx-${txId}`);
+            if (bar) bar.style.width = `${pct}%`;
+            const stats = $(`stats-rx-${txId}`);
+            if (stats) {
+                const elapsed = (Date.now() - rx.startTime) / 1000;
+                const speed = elapsed > 0.5 ? rx.receivedBytes / elapsed : 0;
+                const remaining = Math.max(rx.size - rx.receivedBytes, 0);
+                const eta = speed > 0 ? remaining / speed : Infinity;
+                let extra = `${pct.toFixed(1)}%, ${formatBytes(speed)}/s, ETA ${fmtETA(eta)}`;
+                if (rx.paused) extra += `, paused`;
+                if (rx.stalled) extra += `, waiting for sender…`;
+                stats.innerText = `(${extra})`;
+            }
+        }
+
+        function v2QueueAck(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.ackTimer) return;
+            rx.ackTimer = setTimeout(() => {
+                try {
+                    rx.ackTimer = null;
+                    if (!rx || rx.canceled || rx.done) return;
+                    if (!rx.ackPending.length) return;
+                    const batch = rx.ackPending.splice(0, 100);
+                    safeFileSend(rx.senderId, { type: 'file-v2-ack', txId, acked: batch });
+                } catch (e) {}
+            }, 100);
+        }
+
+        function v2SendReady(txId) {
+            const rx = FileV2In[txId];
+            if (!rx) return;
+            const have = Array.from(rx.written).slice(0, 5000);
+            safeFileSend(rx.senderId, { type: 'file-v2-ready', txId, have, haveCount: rx.written.size, totalChunks: rx.totalChunks });
+        }
+
+        function v2SendMissing(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done || rx.canceled || rx.paused) return;
+            const missing = [];
+            for (let i = 0; i < rx.totalChunks; i++) {
+                if (!rx.written.has(i)) missing.push(i);
+                if (missing.length >= FILE_V2_MAX_CHUNK_MSG) break;
+            }
+            if (missing.length) safeFileSend(rx.senderId, { type: 'file-v2-missing', txId, missing });
+        }
+
+        async function v2OnAnnounce(data, sid) {
+            const txId = data.txId;
+            if (!txId || FileV2Tombstones.has(txId)) return;
+            let rx = FileV2In[txId];
+            if (rx) {
+                // Duplicate announce (retry / reconnect / rejoined with new id):
+                // re-sync without wiping progress; latest announcer gets the ACKs.
+                rx.senderId = sid;
+                v2SendReady(txId);
+                v2UpdateRxUI(txId);
+                return;
+            }
+            rx = {
+                txId, name: data.name || 'file', mime: data.mime || 'application/octet-stream',
+                size: data.size || 0, totalChunks: data.totalChunks || 0, fileHash: data.fileHash || null,
+                senderId: sid, written: new Set(), receivedBytes: 0, startTime: Date.now(),
+                paused: false, canceled: false, done: false, stalled: false,
+                useOpfs: false, fileHandle: null, writable: null, writeChain: Promise.resolve(),
+                memChunks: new Map(), ackPending: [], ackTimer: null, missingTimer: null,
+                lastActivity: Date.now(), initDone: false, pendingEarly: [], uiThrottle: 0, retries: 0
+            };
+            FileV2In[txId] = rx;
+            if (!rx.totalChunks) {
+                // Empty file: complete immediately.
+                rx.initDone = true; rx.done = true;
+                const senderName = peerNames[sid] || "Someone";
+                const blob = new Blob([], { type: rx.mime });
+                renderCompletedFile(URL.createObjectURL(blob), rx.name, rx.mime, senderName, 'theirs');
+                safeFileSend(sid, { type: 'file-v2-ack', txId, acked: [], complete: true });
+                delete FileV2In[txId];
+                return;
+            }
+            const progHtml = `
+            <div>📥 Downloading <b>${escapeHTML(rx.name)}</b> <span id="stats-rx-${txId}" style="font-size:12px; color:#949ba4;">(starting...)</span></div>
+            <div class="progress-container"><div class="progress-bar" id="bar-rx-${txId}"></div></div>
+            <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="tx-btn" id="pause-rx-${txId}" onclick="window.toggleRx('${txId}')">⏸️ Pause</button>
+                <button class="tx-btn tx-btn-danger" onclick="window.cancelRx('${txId}')">❌ Cancel</button>
+            </div>`;
+            addMessage(progHtml, peerNames[sid] || "Someone", 'theirs', `msg-rx-${txId}`);
+            // Init storage async; buffer early chunks meanwhile (fixes old drop-on-early-chunk bug).
+            try {
+                const opfsRoot = await navigator.storage.getDirectory();
+                const fh = await opfsRoot.getFileHandle(txId, { create: true });
+                const w = await fh.createWritable();
+                if (FileV2In[txId] !== rx || rx.canceled) { try { await w.close(); } catch (e) {} return; }
+                rx.fileHandle = fh; rx.writable = w; rx.useOpfs = true;
+            } catch (e) {
+                rx.useOpfs = false;
+            }
+            rx.initDone = true;
+            rx.lastActivity = Date.now();
+            v2SendReady(txId);
+            // Flush early chunks in order.
+            if (rx.pendingEarly.length) {
+                const early = rx.pendingEarly.splice(0, rx.pendingEarly.length);
+                early.sort((a, b) => a.index - b.index);
+                for (const c of early) v2StoreChunk(txId, c.index, c.data, c.h);
+            }
+            // Missing sweep: ask for gaps only when stalled (no activity), never spam.
+            if (rx.missingTimer) clearInterval(rx.missingTimer);
+            rx.missingTimer = setInterval(() => {
+                try {
+                    const r = FileV2In[txId];
+                    if (!r || r.done || r.canceled || r.paused) return;
+                    if (Date.now() - r.lastActivity > 1200 && r.written.size < r.totalChunks) {
+                        r.stalled = true;
+                        v2SendMissing(txId);
+                        v2UpdateRxUI(txId);
+                    }
+                } catch (e) {}
+            }, 1500);
+            v2UpdateRxUI(txId);
+        }
+
+        // Hash-checked store: CRC32 per chunk (sync, cheap) + SHA-256 whole file at end.
+        function v2StoreChunk(txId, index, buf, h) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.canceled || rx.done) return;
+            if (typeof index !== 'number' || index < 0 || index >= rx.totalChunks) return;
+            if (rx.written.has(index)) {
+                rx.ackPending.push(index);
+                v2QueueAck(txId);
+                return;
+            }
+            const byteLen = buf ? (buf.byteLength ?? buf.length ?? buf.size ?? 0) : 0;
+            if (!buf || byteLen === 0) {
+                // Corrupt/empty payload (e.g. failed structured clone) — ask sender to resend, don't poison bitmap.
+                try { safeFileSend(rx.senderId, { type: 'file-v2-missing', txId, missing: [index] }); } catch (e) {}
+                return;
+            }
+            if (typeof h === 'number') {
+                let ok = false;
+                try { ok = (f2Crc32(buf) === h); } catch (e) { ok = false; }
+                if (!ok) {
+                    // Chunk corrupted in transit: drop it and request a resend. Never ACK.
+                    try { safeFileSend(rx.senderId, { type: 'file-v2-missing', txId, missing: [index] }); } catch (e) {}
+                    return;
+                }
+            }
+            const commit = () => {
+                if (rx.written.has(index)) return;
+                rx.written.add(index);
+                rx.receivedBytes += byteLen;
+                rx.lastActivity = Date.now();
+                rx.stalled = false;
+                rx.ackPending.push(index);
+                v2QueueAck(txId);
+                v2UpdateRxUI(txId);
+                const info = $(`msg-rx-${txId}`) && $(`msg-rx-${txId}`).querySelector('.msg-info');
+                if (info && info.innerHTML.includes('Reconnecting')) info.innerHTML = peerNames[rx.senderId] || "Someone";
+                if (rx.written.size >= rx.totalChunks) v2FinishRx(txId);
+            };
+            if (!rx.initDone) {
+                if (rx.pendingEarly.length < 300) rx.pendingEarly.push({ index, data: buf, h });
+                return;
+            }
+            if (rx.paused) {
+                // Still store (sender may have in-flight), but don't advance missing logic.
+                // Fall through to store.
+            }
+            if (rx.useOpfs && rx.writable) {
+                rx.writeChain = rx.writeChain.then(async () => {
+                    try {
+                        await rx.writable.write({ type: 'write', position: index * FILE_V2_CHUNK, data: buf });
+                        commit();
+                    } catch (e) {
+                        // OPFS write failed -> fallback to memory for this chunk.
+                        rx.memChunks.set(index, buf);
+                        commit();
+                    }
+                }).catch(() => { rx.memChunks.set(index, buf); commit(); });
+            } else {
+                rx.memChunks.set(index, buf);
+                commit();
+            }
+        }
+
+        async function v2FinishRx(txId) {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done) return;
+            rx.done = true;
+            if (rx.missingTimer) { try { clearInterval(rx.missingTimer); } catch (e) {} }
+            if (rx.ackTimer) { try { clearTimeout(rx.ackTimer); } catch (e) {} rx.ackTimer = null; }
+            try {
+                let blob;
+                if (rx.useOpfs && rx.fileHandle) {
+                    try { await rx.writable.close(); } catch (e) {}
+                    try {
+                        const f = await rx.fileHandle.getFile();
+                        blob = f.slice(0, f.size, rx.mime);
+                    } catch (e) {
+                        blob = new Blob([...rx.memChunks.entries()].sort((a, b) => a[0] - b[0]).map(e => e[1]), { type: rx.mime });
+                    }
+                } else {
+                    const parts = [];
+                    for (let i = 0; i < rx.totalChunks; i++) {
+                        const c = rx.memChunks.get(i);
+                        if (c) parts.push(c);
+                    }
+                    blob = new Blob(parts, { type: rx.mime });
+                }
+                // End-to-end SHA-256 check. Every chunk already passed CRC32; this
+                // catches anything systematic (wrong file, truncation, OPFS fault).
+                let verified = false;
+                if (rx.fileHash) {
+                    try {
+                        const ab = await blob.arrayBuffer();
+                        const h = await crypto.subtle.digest('SHA-256', ab);
+                        const hex = Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, '0')).join('');
+                        if (hex === rx.fileHash) {
+                            verified = true;
+                        } else if (rx.retries < 1) {
+                            rx.retries++;
+                            rx.done = false; rx.written.clear(); rx.memChunks.clear(); rx.receivedBytes = 0;
+                            rx.lastActivity = Date.now();
+                            if (rx.useOpfs) {
+                                try {
+                                    const w = await rx.fileHandle.createWritable();
+                                    await w.truncate(0); await w.close();
+                                    rx.writable = await rx.fileHandle.createWritable();
+                                } catch (e) {}
+                            }
+                            addSystemMsg(`⚠️ Hash mismatch on <b>${escapeHTML(rx.name)}</b> — requesting retry...`);
+                            v2SendMissing(txId);
+                            return;
+                        } else {
+                            // Second mismatch: refuse to deliver a corrupt file.
+                            throw new Error('SHA-256 verification failed twice');
+                        }
+                    } catch (e) {
+                        if (e && e.message === 'SHA-256 verification failed twice') throw e;
+                        // Hash computation itself failed (e.g. huge blob) -> deliver with
+                        // chunk-level CRC32 as the integrity guarantee.
+                    }
+                }
+                const node = $(`msg-rx-${txId}`);
+                if (node) node.remove();
+                const url = URL.createObjectURL(blob);
+                renderCompletedFile(url, rx.name, rx.mime, peerNames[rx.senderId] || "Someone", 'theirs', verified);
+                playJoinSound();
+                notifyUser(`Incoming file from ${peerNames[rx.senderId] || "Someone"}`, rx.name);
+                safeFileSend(rx.senderId, { type: 'file-v2-ack', txId, acked: [], complete: true });
+                // Cleanup OPFS copy after materializing blob URL? Keep handle 60s for debugging, then remove.
+                setTimeout(async () => {
+                    try {
+                        if (rx.useOpfs) { const root = await navigator.storage.getDirectory(); await root.removeEntry(txId); } 
+                    } catch (e) {}
+                }, 60000);
+            } catch (e) {
+                console.error('finish rx failed', e);
+                const node = $(`msg-rx-${txId}`);
+                if (node) node.innerHTML = `<div class="msg-info">${peerNames[rx.senderId] || 'Someone'}</div><div style="color: #da373c;">❌ Download failed: ${escapeHTML(e.message || e)}</div>`;
+            } finally {
+                delete FileV2In[txId];
+            }
+        }
+
+        window.toggleRx = (txId) => {
+            const rx = FileV2In[txId];
+            if (!rx || rx.done) return;
+            rx.paused = !rx.paused;
+            const btn = $(`pause-rx-${txId}`);
+            if (btn) btn.innerHTML = rx.paused ? "▶️ Resume" : "⏸️ Pause";
+            safeFileSend(rx.senderId, { type: 'file-v2-control-rx', txId, action: rx.paused ? 'pause' : 'resume' });
+            if (!rx.paused) { rx.lastActivity = Date.now(); v2SendMissing(txId); }
+            v2UpdateRxUI(txId);
+        };
+
+        window.cancelRx = async (txId) => {
+            const rx = FileV2In[txId];
+            const senderId = rx ? rx.senderId : null;
+            if (senderId) safeFileSend(senderId, { type: 'file-v2-control-rx', txId, action: 'cancel' });
+            FileV2Tombstones.add(txId);
+            if (rx) {
+                rx.canceled = true;
+                if (rx.missingTimer) { try { clearInterval(rx.missingTimer); } catch (e) {} }
+                if (rx.ackTimer) { try { clearTimeout(rx.ackTimer); } catch (e) {} }
+                try { if (rx.writable) await rx.writable.close(); } catch (e) {}
+                try { if (rx.useOpfs) { const root = await navigator.storage.getDirectory(); await root.removeEntry(txId); } } catch (e) {}
+                delete FileV2In[txId];
+            }
+            const msgNode = $(`msg-rx-${txId}`);
+            if (msgNode) msgNode.innerHTML = `<div class="msg-info">${escapeHTML(peerNames[senderId] || 'Someone')}</div><div style="color: #da373c;">❌ Download Canceled</div>`;
+            setTimeout(() => FileV2Tombstones.delete(txId), 60000);
+        };
+
+        function v2SendHello(sid) {
+            try {
+                const rx = Object.values(FileV2In)
+                    .filter(r => !r.done && !r.canceled)
+                    .map(r => ({ txId: r.txId, haveCount: r.written.size, have: Array.from(r.written).slice(0, 2000), totalChunks: r.totalChunks }));
+                const tx = Object.values(FileV2Out)
+                    .filter(t => !t.canceled && !t.done)
+                    .map(t => t.txId);
+                safeFileSend(sid, { type: 'file-v2-hello', rx, tx });
+            } catch (e) {}
+        }
+
+        function v2OnHello(data, sid) {
+            try {
+                // Peer tells us what they still need -> resume our sends.
+                for (const need of (data.rx || [])) {
+                    const tx = FileV2Out[need.txId];
+                    if (!tx || tx.canceled) continue;
+                    if (!tx.peers[sid]) tx.peers[sid] = v2NewPeerState();
+                    const ps = tx.peers[sid];
+                    if (ps.done || ps.canceled) continue;
+                    const have = new Set(need.have || []);
+                    for (const h of have) { ps.acked.add(h); ps.lastAck = Date.now(); }
+                    // Re-announce so receiver refreshes meta, then let the scheduler resume.
+                    safeFileSend(sid, { type: 'file-v2-announce', txId: tx.txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null });
+                    ps.lastAnnounce = Date.now();
+                    ps.stalled = false;
+                    f2Kick();
+                }
+                // Peer tells us what they can still send -> re-request our missing.
+                for (const txId of (data.tx || [])) {
+                    const rx = FileV2In[txId];
+                    if (rx && !rx.done && !rx.canceled) {
+                        rx.senderId = sid;
+                        rx.stalled = false;
+                        v2SendReady(txId);
+                        v2SendMissing(txId);
+                    }
+                }
+                // Late joiner: we have outbox Tx peer never saw (not in their rx, and they didn't list it). Announce it.
+                // F10: this includes completed-but-cached Tx (kept 5 min) — reopen
+                // the Tx so a join-after-done peer still gets the file.
+                for (const txId of Object.keys(FileV2Out)) {
+                    const tx = FileV2Out[txId];
+                    if (!tx || tx.canceled) continue;
+                    const peerKnows = (data.rx || []).some(r => r.txId === txId);
+                    if (!peerKnows && !tx.peers[sid]) {
+                        if (tx.done) { tx.done = false; try { addSystemMsg(`📤 Serving <b>${escapeHTML(tx.name)}</b> to a late joiner...`); } catch (e) {} }
+                        v2AnnounceTo(sid, txId);
+                    }
+                }
+            } catch (e) { console.warn('hello handling failed', e); }
+        }
+
+        // Background healer (tick-driven, like everything else): heal channels,
+        // re-announce lost announces, refresh stall flags, pick up late joiners.
+        setInterval(() => {
+            try {
+                // Heal missing file channels first (chat up, file down -> redial).
+                try {
+                    for (const sid of v2AllPeerIds()) {
+                        if ((!fileConns[sid] || !fileConns[sid].open) && connections[sid] && connections[sid].open) ensureFileConn(sid);
+                    }
+                } catch (e) {}
+                const now = Date.now();
+                for (const txId of Object.keys(FileV2Out)) {
+                    const tx = FileV2Out[txId];
+                    if (!tx || tx.canceled) continue;
+                    // F10: serve completed-but-cached files to brand-new peers too.
+                    for (const sid of v2AllPeerIds()) {
+                        try {
+                            if (!tx.peers[sid] && fileConns[sid] && fileConns[sid].open) {
+                                if (tx.done) { tx.done = false; try { addSystemMsg(`📤 Serving <b>${escapeHTML(tx.name)}</b> to a late joiner...`); } catch (e) {} }
+                                v2AnnounceTo(sid, txId);
+                            }
+                        } catch (e) {}
+                    }
+                    if (tx.done) continue;
+                    for (const sid of Object.keys(tx.peers)) {
+                        const ps = tx.peers[sid];
+                        if (ps.done || ps.canceled) continue;
+                        // Lost announce? Receiver never responded at all -> re-announce.
+                        if (!ps.gotReady && ps.acked.size === 0 && now - (ps.lastAnnounce || 0) > 8000) {
+                            try {
+                                if (fileConns[sid] && fileConns[sid].open) {
+                                    safeFileSend(sid, { type: 'file-v2-announce', txId, name: tx.name, mime: tx.mime, size: tx.size, totalChunks: tx.totalChunks, fileHash: tx.fileHash || null });
+                                    ps.lastAnnounce = now;
+                                }
+                            } catch (e) {}
+                        }
+                        // Stall flag purely from ACK silence (display + prioritization hint).
+                        if (!ps.done && now - (ps.lastAck || tx.startTime) > 6000 && ps.acked.size < tx.totalChunks) {
+                            if (!ps.stalled) { ps.stalled = true; v2UpdateSenderUI(txId); }
+                        }
+                    }
+                }
+                f2Kick();
+            } catch (e) {}
+        }, 5000);
+
+        let currentFx = 0; 
+        const fxIcons = ['✨', '🧚', '👻', '🌈'];
+        const fxNames = ['None', 'Fairy Dust', 'Ghost', 'Rainbow'];
+        let fxHue = 0;
+        let lastFxTime = 0;
+
+        $('cursor-btn').onclick = () => {
+            currentFx = (currentFx + 1) % 4;
+            $('cursor-btn').innerText = fxIcons[currentFx];
+            $('cursor-btn').classList.toggle('active', currentFx > 0);
+            addSystemMsg(`Cursor effect: <b>${fxNames[currentFx]}</b>`);
+        };
+
+        document.addEventListener('mousemove', e => {
+            if (currentFx === 0 || $('login-screen').style.display !== 'none' || isResizing) return;
+            const now = Date.now();
+            if (now - lastFxTime < 30) return; 
+            lastFxTime = now;
+
+            const p = document.createElement('div');
+            p.className = 'fx-part';
+            p.style.left = (e.clientX - 10) + 'px';
+            p.style.top = (e.clientY - 10) + 'px';
+
+            if (currentFx === 1) { 
+                p.innerText = '✨';
+                p.style.fontSize = (Math.random() * 12 + 8) + 'px';
+                p.style.animation = 'fxFall 0.8s forwards';
+            } else if (currentFx === 2) { 
+                p.innerText = '👻';
+                p.style.fontSize = '20px';
+                p.style.animation = 'fxFloat 0.8s forwards';
+            } else if (currentFx === 3) { 
+                p.style.width = '14px';
+                p.style.height = '14px';
+                p.style.borderRadius = '50%';
+                p.style.background = `hsl(${fxHue}, 100%, 50%)`;
+                p.style.boxShadow = `0 0 10px hsl(${fxHue}, 100%, 50%)`;
+                p.style.animation = 'fxFade 0.6s forwards';
+                fxHue = (fxHue + 15) % 360;
+            }
+
+            $('cursor-fx').appendChild(p);
+            setTimeout(() => p.remove(), 1000);
+        });
+
+        window.addEventListener('DOMContentLoaded', () => {
+            // PeerJS may still be loading via CDN fallback -> wait for it (max ~10s).
+            if (typeof Peer === 'undefined') {
+                let tries = 0;
+                const wait = setInterval(() => {
+                    if (typeof Peer !== 'undefined') { clearInterval(wait); bootLoginPing(); }
+                    else if (++tries > 50) { clearInterval(wait); $('online-users').innerText = '❌ Could not load PeerJS library'; }
+                }, 200);
+            } else bootLoginPing();
+        });
+
+        function bootLoginPing() {
+            tempPeer = new Peer(peerConfig);
+            
+            const doCheck = () => {
+                if(!tempPeer || tempPeer.destroyed || tempPeer.disconnected) return;
+                const pConn = tempPeer.connect(ROOM_ID, { metadata: { isPing: true }, reliable: true });
+                let gotResp = false;
+                
+                pConn.on('open', () => { pConn.send({ type: 'get-count' }); });
+                pConn.on('data', d => {
+                    if (d.type === 'count-resp') {
+                        gotResp = true;
+                        const count = d.count;
+                        $('online-users').innerText = `🟢 ${count} User${count !== 1 ? 's' : ''} Online`;
+                        setTimeout(() => pConn.close(), 100);
+                    }
+                });
+                pConn.on('error', () => {
+                    if(!gotResp) $('online-users').innerText = "🟢 0 Users Online";
+                });
+                setTimeout(() => { 
+                    if(!gotResp) {
+                        $('online-users').innerText = "🟢 0 Users Online"; 
+                        if (pConn) pConn.close();
+                    }
+                }, 2000);
+            };
+
+            tempPeer.on('open', () => {
+                doCheck();
+                window.loginPingInterval = setInterval(doCheck, 3000);
+            });
+            tempPeer.on('error', () => {
+                $('online-users').innerText = "🟢 0 Users Online";
+            });
+            
+            $('messages').addEventListener('click', (e) => {
+                if (e.target.tagName === 'IMG') {
+                    if (e.target.requestFullscreen) {
+                        e.target.requestFullscreen();
+                    } else if (e.target.webkitRequestFullscreen) {
+                        e.target.webkitRequestFullscreen();
+                    }
+                }
+            });
+        }
+
+        const trig = e => { if (e.key === 'Enter') $('join-btn').click(); };
+        $('username').addEventListener('keypress', trig); $('room-pass').addEventListener('keypress', trig);
+        const escapeHTML = s => s.replace(/[&<>'"]/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[t]));
+        const linkify = s => s.replace(/(https?:\/\/[^\s]+)/g, url => `<a href="${url}" target="_blank">${url}</a>`);
+
+        $('join-btn').onclick = async () => {
+            if (window.loginPingInterval) clearInterval(window.loginPingInterval);
+            if (tempPeer && !tempPeer.destroyed) { tempPeer.destroy(); }
+            
+            myName = $('username').value.trim() || "Anon";
+            if ($('room-pass').value.trim() !== "secretpassword") return alert("Incorrect password! Access denied.");
+            
+            if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") {
+                Notification.requestPermission();
+            }
+
+            try { 
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, latency: 0 } 
+                }); 
+            } 
+            catch(err) {}
+            
+            $('login-screen').style.display = 'none'; 
+            $('conn-status').innerText = "Initializing...";
+
+            requestWakeLock(); // Request screen to stay awake once logged in
+            
+            $('room-clock').style.display = 'inline-block';
+            const tickClock = () => { 
+                const now = new Date();
+                const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                const dateStr = `${days[now.getDay()]} ${now.getDate()}, ${now.getFullYear()}`;
+                const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                $('room-clock').innerHTML = `${dateStr}<br>${timeStr}`; 
+            };
+            tickClock();
+            setInterval(tickClock, 1000);
+
+            initPeerJS();
+        };
+
+        function notifyUser(title, body) {
+            if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
+                new Notification(title, { body: body });
+            }
+        }
+
+        function attachPeerHandlers(p, onOpen) {
+            p.on('connection', handleNewConnection); p.on('call', handleNewCall);
+            p.on('open', onOpen);
+            // F3: signalling socket drop must recover. Without this every later
+            // connectToPeer() silently fails while the UI still says "Connected".
+            p.on('disconnected', () => {
+                try { $('conn-status').innerText = "Reconnecting..."; $('conn-status').style.color = "#f0b232"; } catch (e) {}
+                addSystemMsg("⚠️ Signalling disconnected — reconnecting...");
+                try { p.reconnect(); } catch (e) {}
+                clearTimeout(peerReconnectTimer);
+                peerReconnectTimer = setTimeout(() => {
+                    try {
+                        if (p.disconnected && !p.destroyed) p.reconnect();
+                        if (p.disconnected && !p.destroyed) addSystemMsg("❌ Signalling still down. Check network; will keep retrying.");
+                    } catch (e) {}
+                }, 5000);
+            });
+            p.on('close', () => {
+                try { $('conn-status').innerText = "Disconnected"; $('conn-status').style.color = "#da373c"; } catch (e) {}
+            });
+        }
+
+        function initPeerJS() {
+            $('searching-container').style.display = 'flex';
+            peer = new Peer(ROOM_ID, peerConfig);
+            attachPeerHandlers(peer, id => {
+                myId = id; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
+                const safeMyName = escapeHTML(myName);
+                addSystemMsg(`You joined as <b>${safeMyName}</b>`); addUserToSidebar(safeMyName, "me"); enableChat();
+            });
+            peer.on('error', err => {
+                if (err.type === 'unavailable-id') {
+                    peer = new Peer(peerConfig);
+                    attachPeerHandlers(peer, id => {
+                        myId = id; $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
+                        const safeMyName = escapeHTML(myName);
+                        addSystemMsg(`You joined as <b>${safeMyName}</b>`); addUserToSidebar(safeMyName, "me"); connectToPeer(ROOM_ID); enableChat();
+                    });
+                    peer.on('error', e => {
+                        if (e && (e.type === 'peer-unavailable')) scheduleRetry(ROOM_ID);
+                    });
+                } else if (err && (err.type === 'peer-unavailable' || err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error' || err.type === 'socket-closed')) {
+                    // F9: a failed dial must re-queue with backoff instead of vanishing.
+                    try { scheduleRetry(ROOM_ID); } catch (e) {}
+                }
+            });
+        }
+
+        // F9: retry queue with exponential backoff (400ms → 8s max). Pending locks
+        // no longer swallow attempts; each failure schedules the next try.
+        function scheduleRetry(targetId) {
+            if (!targetId || targetId === myId) return;
+            if (connections[targetId] && connections[targetId].open) { retryCount[targetId] = 0; return; }
+            try { if (!peer || peer.destroyed || peer.disconnected) return; } catch (e) { return; }
+            const n = Math.min((retryCount[targetId] || 0) + 1, 6);
+            retryCount[targetId] = n;
+            const delay = Math.min(400 * Math.pow(2, n - 1), 8000);
+            setTimeout(() => { try { connectToPeer(targetId); } catch (e) {} }, delay);
+        }
+
+        function redialAudio(targetId) {
+            // F4/F5: single place that (re)dials the mic call; tracked so drops can re-dial.
+            if (!localStream || !targetId || targetId === myId) return null;
+            try {
+                const prev = audioCalls[targetId];
+                try { if (prev && prev.open !== false) return prev; } catch (e) {}
+                const call = peer.call(targetId, localStream, { metadata: { type: 'audio' }, sdpTransform: mungeSDP });
+                audioCalls[targetId] = call;
+                try {
+                    call.on('close', () => {
+                        if (audioCalls[targetId] !== call) return;
+                        delete audioCalls[targetId];
+                        // Media-only drop (chat still up): redial shortly (F5).
+                        try { if (localStream && connections[targetId] && connections[targetId].open) setTimeout(() => redialAudio(targetId), 1500); } catch (e) {}
+                    });
+                    call.on('error', () => {
+                        if (audioCalls[targetId] !== call) return;
+                        delete audioCalls[targetId];
+                        try { if (localStream) scheduleRetry(targetId); } catch (e) {}
+                    });
+                } catch (e) {}
+                handleNewCall(call);
+                return call;
+            } catch (e) { return null; }
+        }
+
+        function connectToPeer(targetId) {
+            if (!targetId || connections[targetId] || pendingConnections.has(targetId) || targetId === myId) return;
+            try { knownPeerIds.add(targetId); } catch (e) {}
+            pendingConnections.add(targetId); setTimeout(() => pendingConnections.delete(targetId), 4000);
+            try { if (!peer || peer.destroyed || peer.disconnected) { scheduleRetry(targetId); return; } } catch (e) { return; }
+
+            try {
+                const connChat = peer.connect(targetId, { reliable: false, label: 'chat' });
+                handleNewConnection(connChat);
+            } catch (e) { scheduleRetry(targetId); }
+
+            try {
+                const connFile = peer.connect(targetId, { reliable: true, label: 'file' });
+                handleNewConnection(connFile);
+            } catch (e) { scheduleRetry(targetId); }
+
+            redialAudio(targetId);
+        }
+
+        // F5: watch an outgoing screen/cam call; if it closes with chat alive, redial it.
+        function watchMediaCall(targetId, call, kind) {
+            try {
+                call.on('close', () => {
+                    try {
+                        if (kind === 'screenshare' && screenCalls[targetId] !== call) return;
+                        if (kind === 'webcam' && camCalls[targetId] !== call) return;
+                    } catch (e) { return; }
+                    try { if (kind === 'screenshare') delete screenCalls[targetId]; else delete camCalls[targetId]; } catch (e) {}
+                    try {
+                        if (!(connections[targetId] && connections[targetId].open)) return;
+                        if (kind === 'screenshare' && screenStream) setTimeout(() => {
+                            try {
+                                if (screenCalls[targetId] || !(connections[targetId] && connections[targetId].open)) return;
+                                screenCalls[targetId] = peer.call(targetId, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
+                                applyBitrateLimit(screenCalls[targetId], 1000000);
+                                watchMediaCall(targetId, screenCalls[targetId], 'screenshare');
+                            } catch (e) {}
+                        }, 1500);
+                        if (kind === 'webcam' && camStream) setTimeout(() => {
+                            try {
+                                if (camCalls[targetId] || !(connections[targetId] && connections[targetId].open)) return;
+                                camCalls[targetId] = peer.call(targetId, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
+                                applyBitrateLimit(camCalls[targetId], 500000);
+                                watchMediaCall(targetId, camCalls[targetId], 'webcam');
+                            } catch (e) {}
+                        }, 1500);
+                    } catch (e) {}
+                });
+                call.on('error', () => {
+                    try { if (kind === 'screenshare') delete screenCalls[targetId]; else delete camCalls[targetId]; } catch (e) {}
+                });
+            } catch (e) {}
+        }
+
+        function handleNewConnection(conn) {
+            if (conn.metadata?.isPing) {
+                conn.on('data', data => {
+                    if (data.type === 'get-count') conn.send({ type: 'count-resp', count: Object.keys(connections).length + 1 });
+                });
+                return;
+            }
+
+            if (conn.label === 'file') {
+                const setupFile = () => {
+                    // Mesh dials both directions -> duplicate pairs are normal. Keep the first
+                    // working channel, close newcomers. Without this, duplicates overwrite
+                    // fileConns[] and the loser's on('close') deletes the winner's entry,
+                    // which is why only one peer would receive files.
+                    try {
+                        const prev = fileConns[conn.peer];
+                        if (prev && prev !== conn && prev.open) { try { conn.close(); } catch (e) {} return; }
+                    } catch (e) {}
+                    fileConns[conn.peer] = conn;
+                    try {
+                        const dc = conn.dataChannel;
+                        if (dc && typeof dc.bufferedAmountLowThreshold === 'number') dc.bufferedAmountLowThreshold = 256 * 1024;
+                    } catch (e) {}
+                    // Reconnect handshake: exchange incomplete inventories so stalled transfers resume.
+                    try { v2SendHello(conn.peer); } catch (e) {}
+                    // If we have queued outbox files this peer never saw, announce them.
+                    try {
+                        for (const txId of Object.keys(FileV2Out)) {
+                            const tx = FileV2Out[txId];
+                            if (tx && !tx.canceled && !tx.peers[conn.peer]) {
+                                try {
+                                    if (tx.done) { tx.done = false; try { addSystemMsg(`📤 Serving <b>${escapeHTML(tx.name)}</b> to a late joiner...`); } catch (e2) {} }
+                                    v2AnnounceTo(conn.peer, txId);
+                                } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                };
+                conn.open ? setupFile() : conn.on('open', setupFile);
+
+                conn.on('data', async data => {
+                    const sid = conn.peer; lastSeen[sid] = Date.now();
+                    try {
+                        if (!data || typeof data.type !== 'string') return;
+                        // Ignore legacy protocol (we broke it cleanly on purpose).
+                        if (data.type === 'file-meta' || data.type === 'file-chunk' || data.type === 'file-nack' || data.type === 'file-control' || data.type === 'file-control-rx') return;
+
+                        if (data.type === 'hb') { try { safeFileSend(sid, { type: 'hb-ack', time: data.time }); } catch (e) {} }
+                        else if (data.type === 'hb-ack') {
+                            try {
+                                const lat = Date.now() - data.time;
+                                lastRealPing[sid] = lat;
+                                updatePingUI(sid, lat);
+                            } catch (e) {}
+                        }
+                        else if (data.type === 'file-v2-announce') { v2OnAnnounce(data, sid); }
+                        else if (data.type === 'file-v2-chunk') {
+                            if (FileV2Tombstones.has(data.txId)) return;
+                            v2StoreChunk(data.txId, data.index, data.data, data.h);
+                        }
+                        else if (data.type === 'file-v2-hash') {
+                            const rx = FileV2In[data.txId];
+                            if (rx && !rx.done && !rx.canceled && data.fileHash) rx.fileHash = data.fileHash;
+                        }
+                        else if (data.type === 'file-v2-ack') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx) return;
+                            const ps = tx.peers[sid];
+                            if (!ps || ps.done || ps.canceled) return;
+                            for (const i of (data.acked || [])) {
+                                try {
+                                    const isNew = !ps.acked.has(i);
+                                    const rec = ps.inflight.get(i);
+                                    const sentAt = rec && typeof rec === 'object' ? rec.sentAt : 0;
+                                    f2ClearTimer(rec);
+                                    ps.inflight.delete(i);
+                                    if (isNew) {
+                                        // Genuinely new confirmation (not a dup/resend ACK):
+                                        // feeds the live MB/s window AND grows the congestion window.
+                                        try { tx.rateLog.push({ t: Date.now(), bytes: FILE_V2_CHUNK }); } catch (e) {}
+                                        f2Grow(ps, sentAt ? (Date.now() - sentAt) : 0);
+                                    }
+                                    ps.acked.add(i);
+                                    ps.lastAck = Date.now();
+                                    const r = ps.resend.indexOf(i);
+                                    if (r >= 0) ps.resend.splice(r, 1);
+                                } catch (e) {}
+                            }
+                            if (data.complete) { v2MarkPeerDone(data.txId, sid); return; }
+                            if (ps.acked.size >= tx.totalChunks && ps.inflight.size === 0) v2MarkPeerDone(data.txId, sid);
+                            else { ps.stalled = false; v2UpdateSenderUI(data.txId); f2Kick(); }
+                        }
+                        else if (data.type === 'file-v2-ready') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx || tx.canceled) return;
+                            if (!tx.peers[sid]) tx.peers[sid] = v2NewPeerState();
+                            const ps = tx.peers[sid];
+                            if (ps.done || ps.canceled) return;
+                            for (const h of (data.have || [])) ps.acked.add(h);
+                            ps.gotReady = true;
+                            ps.lastAck = Date.now();
+                            // Advance next pointer past already-have prefix.
+                            while (ps.next < tx.totalChunks && ps.acked.has(ps.next)) ps.next++;
+                            ps.stalled = false;
+                            v2UpdateSenderUI(data.txId);
+                            f2Kick();
+                        }
+                        else if (data.type === 'file-v2-missing') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx || tx.canceled) return;
+                            const ps = tx.peers[sid];
+                            if (!ps || ps.done || ps.canceled) return;
+                            for (const m of (data.missing || []).slice(0, FILE_V2_MAX_CHUNK_MSG)) {
+                                if (typeof m !== 'number' || m < 0 || m >= tx.totalChunks) continue;
+                                if (ps.acked.has(m) || ps.inflight.has(m) || ps.resend.includes(m)) continue;
+                                ps.resend.push(m);
+                            }
+                            ps.stalled = false;
+                            ps.lastAck = Date.now();
+                            f2Kick();
+                        }
+                        else if (data.type === 'file-v2-control') {
+                            const rx = FileV2In[data.txId];
+                            if (!rx || rx.done) return;
+                            if (data.action === 'pause') { rx.paused = true; const b = $(`pause-rx-${data.txId}`); if (b) b.innerHTML = "▶️ Resume"; }
+                            else if (data.action === 'resume') { rx.paused = false; rx.lastActivity = Date.now(); const b = $(`pause-rx-${data.txId}`); if (b) b.innerHTML = "⏸️ Pause"; v2SendMissing(data.txId); }
+                            else if (data.action === 'cancel') {
+                                rx.canceled = true;
+                                if (rx.missingTimer) { try { clearInterval(rx.missingTimer); } catch (e) {} }
+                                try { if (rx.writable) await rx.writable.close(); } catch (e) {}
+                                try { const root = await navigator.storage.getDirectory(); await root.removeEntry(data.txId); } catch (e) {}
+                                delete FileV2In[data.txId];
+                                const n = $(`msg-rx-${data.txId}`);
+                                if (n) n.innerHTML = `<div class="msg-info">${peerNames[sid] || 'Someone'}</div><div style="color: #da373c;">❌ Sender Canceled Transfer</div>`;
+                            }
+                            v2UpdateRxUI(data.txId);
+                        }
+                        else if (data.type === 'file-v2-control-rx') {
+                            const tx = FileV2Out[data.txId];
+                            if (!tx) return;
+                            const ps = tx.peers[sid];
+                            if (!ps) return;
+                            if (data.action === 'pause') ps.paused = true;
+                            else if (data.action === 'resume') { ps.paused = false; ps.stalled = false; ps.backoffUntil = 0; f2Kick(); }
+                            else if (data.action === 'cancel') {
+                                ps.canceled = true;
+                                for (const t of ps.inflight.values()) { f2ClearTimer(t); }
+                                ps.inflight.clear();
+                                v2MaybeFinishTx(data.txId);
+                                // Canceled peer leaves numerator + denominator NOW, not next tick.
+                                v2UpdateSenderUI(data.txId, true);
+                            }
+                            v2UpdateSenderUI(data.txId);
+                        }
+                        else if (data.type === 'file-v2-done') {
+                            const rx = FileV2In[data.txId];
+                            if (rx && !rx.done && !rx.canceled) v2SendMissing(data.txId);
+                        }
+                        else if (data.type === 'file-v2-hello') { v2OnHello(data, sid); }
+                    } catch (e) { console.warn('file-v2 msg failed', e); }
+                });
+                conn.on('close', () => {
+                    if (fileConns[conn.peer] !== conn) return; // stale duplicate, ignore
+                    delete fileConns[conn.peer];
+                    // Mark sender sessions to this peer as disconnected (they keep state + retry).
+                    for (const txId of Object.keys(FileV2Out)) {
+                        const ps = FileV2Out[txId] && FileV2Out[txId].peers[conn.peer];
+                        if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(txId); }
+                    }
+                    // If chat is still alive, the file channel died half-way -> redial it.
+                    try {
+                        if (connections[conn.peer] && connections[conn.peer].open) setTimeout(() => ensureFileConn(conn.peer), 1500);
+                    } catch (e) {}
+                });
+                conn.on('error', () => {
+                    if (fileConns[conn.peer] !== conn) return; // stale duplicate, ignore
+                    delete fileConns[conn.peer];
+                    for (const txId of Object.keys(FileV2Out)) {
+                        const ps = FileV2Out[txId] && FileV2Out[txId].peers[conn.peer];
+                        if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(txId); }
+                    }
+                    try {
+                        if (connections[conn.peer] && connections[conn.peer].open) setTimeout(() => ensureFileConn(conn.peer), 1500);
+                    } catch (e) {}
+                });
+                return;
+            }
+
+            const setup = () => {
+                try {
+                    const prev = connections[conn.peer];
+                    if (prev && prev !== conn && prev.open) { try { conn.close(); } catch (e) {} return; }
+                } catch (e) {}
+                pendingConnections.delete(conn.peer); lastSeen[conn.peer] = Date.now();
+                try { knownPeerIds.add(conn.peer); retryCount[conn.peer] = 0; } catch (e) {}
+                $('searching-container').style.display = 'none'; connections[conn.peer] = conn;
+                $('conn-status').innerText = "Connected"; $('conn-status').style.color = "#23a559";
+                conn.send({ type: 'name', value: myName });
+
+                const peers = Object.keys(connections).filter(id => id !== conn.peer);
+                if(peers.length) conn.send({ type: 'peer-list', peers });
+
+                // F4: incoming-side rejoin must also restore the mic call
+                // (previously only screen/cam were re-dialled here).
+                redialAudio(conn.peer);
+                if (screenStream) {
+                    try { if (screenCalls[conn.peer]) screenCalls[conn.peer].close(); } catch (e) {}
+                    screenCalls[conn.peer] = peer.call(conn.peer, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
+                    applyBitrateLimit(screenCalls[conn.peer], 1000000);
+                    watchMediaCall(conn.peer, screenCalls[conn.peer], 'screenshare');
+                }
+                if (camStream) {
+                    try { if (camCalls[conn.peer]) camCalls[conn.peer].close(); } catch (e) {}
+                    camCalls[conn.peer] = peer.call(conn.peer, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
+                    applyBitrateLimit(camCalls[conn.peer], 500000);
+                    watchMediaCall(conn.peer, camCalls[conn.peer], 'webcam');
+                }
+            };
+            
+            conn.open ? setup() : conn.on('open', setup);
+            conn.on('data', data => {
+                const sid = conn.peer; lastSeen[sid] = Date.now();
+                if (data.type === 'name') {
+                    const safeName = escapeHTML(data.value);
+                    peerNames[sid] = safeName;
+                    addUserToSidebar(safeName, sid);
+                    addSystemMsg(`<b>${safeName}</b> joined.`);
+                    playJoinSound();
+                }
+                else if (data.type === 'peer-list' || data.type === 'mesh-sync') data.peers.forEach(pid => { try { if (pid && pid !== myId) knownPeerIds.add(pid); } catch (e) {} if(pid !== myId && !connections[pid]) connectToPeer(pid); });
+                else if (data.type === 'text') {
+                    const senderName = peerNames[sid] || "Unknown";
+                    addMessage(linkify(escapeHTML(data.value)), senderName, 'theirs');
+                    playJoinSound();
+                    notifyUser(`New message from ${senderName}`, data.value);
+                }
+                else if (data.type === 'typing') { 
+                    const uname = peerNames[sid] || "Someone"; 
+                    data.state ? typingUsers.add(uname) : typingUsers.delete(uname); 
+                    updateTypingUI(); 
+                }
+                else if (data.type === 'ping') conn.send({ type: 'pong', time: data.time });
+                else if (data.type === 'hb') { try { conn.send({ type: 'hb-ack', time: data.time }); } catch (e) {} }
+                else if (data.type === 'hb-ack') {
+                    const lat = Date.now() - data.time;
+                    lastRealPing[sid] = lat;
+                    updatePingUI(sid, lat);
+                }
+                else if (data.type === 'leave') { removePeer(sid); return; }
+                else if (data.type === 'pong') {
+                    const lat = Date.now() - data.time;
+                    lastRealPing[sid] = lat;
+                    updatePingUI(sid, lat);
+                }
+                else if (data.type === 'play-sound') { 
+                    playCustomSound(data.buffer, data.mime, sid); 
+                    addSystemMsg(`🎵 <b>${peerNames[sid] || "Someone"}</b> played a sound.`);
+                    const url = URL.createObjectURL(new Blob([data.buffer], { type: data.mime }));
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${data.name || 'sound'}" class="chat-media-link">${dlIcon} Download Audio</a>`, peerNames[sid] || "Someone", 'theirs');
+                }
+            });
+            conn.on('close', () => { if (connections[conn.peer] !== conn) return; removePeer(conn.peer); });
+            conn.on('error', () => { if (connections[conn.peer] !== conn) return; removePeer(conn.peer); });
+        }
+
+        function handleNewCall(call) {
+            const type = call.metadata?.type;
+            if (type === 'screenshare' || type === 'webcam') {
+                call.answer(undefined, { sdpTransform: mungeSDP });
+                call.on('stream', st => addVideoElement(call.peer + (type==='webcam'?'-cam':''), st, false));
+                call.on('close', () => $(`video-${call.peer}${type==='webcam'?'-cam':''}`)?.remove());
+                return;
+            }
+            localStream ? call.answer(localStream, { sdpTransform: mungeSDP }) : call.answer(undefined, { sdpTransform: mungeSDP });
+            call.on('stream', st => {
+                if (!$(`audio-${call.peer}`)) {
+                    const a = new Audio(); a.id = `audio-${call.peer}`; a.srcObject = st; a.autoplay = true;
+                    document.body.appendChild(a);
+                    
+                    const vs = $(`vol-${call.peer}`); if(vs) a.volume = vs.value;
+                    const muteIcon = $(`mute-icon-${call.peer}`);
+                    if(muteIcon && muteIcon.innerText === "🔇") a.muted = true;
+                }
+            });
+        }
+        
+        function applyBitrateLimit(call, maxBitrate) {
+            call.on('open', () => {
+                if (!call.peerConnection) return;
+                const senders = call.peerConnection.getSenders();
+                const videoSender = senders.find(s => s.track && s.track.kind === 'video');
+                if (videoSender) {
+                    const params = videoSender.getParameters();
+                    if (!params.encodings) params.encodings = [{}];
+                    params.encodings[0].maxBitrate = maxBitrate;
+                    videoSender.setParameters(params).catch(e => console.warn("Failed to set bitrate limit", e));
+                }
+            });
+        }
+
+        function removePeer(id) {
+            if (!connections[id]) return;
+            const uname = peerNames[id] || "Someone";
+            addSystemMsg(`<b>${uname}</b> left.`); playLeaveSound();
+            
+            if (typingUsers.has(uname)) { typingUsers.delete(uname); updateTypingUI(); }
+
+            // Keep file sessions alive across disconnects; they resume via file-v2-hello.
+            for (let tid in FileV2In) {
+                if (FileV2In[tid].senderId === id) {
+                    FileV2In[tid].stalled = true;
+                    const msgNode = $(`msg-rx-${tid}`);
+                    if (msgNode) {
+                        const info = msgNode.querySelector('.msg-info');
+                        if (info) info.innerHTML = `${escapeHTML(uname)} <span style="color: #f0b232;">(Reconnecting...)</span>`;
+                    }
+                }
+            }
+            for (let tid in FileV2Out) {
+                const ps = FileV2Out[tid].peers[id];
+                if (ps && !ps.done && !ps.canceled) { ps.connected = false; ps.stalled = true; v2UpdateSenderUI(tid); }
+            }
+
+            ['', '-cam'].forEach(ext => { $(`video-${id}${ext}`)?.remove(); });
+            if (screenCalls[id]) { try { screenCalls[id].close(); } catch (e) {} delete screenCalls[id]; }
+            if (camCalls[id]) { try { camCalls[id].close(); } catch (e) {} delete camCalls[id]; }
+            if (audioCalls[id]) { try { audioCalls[id].close(); } catch (e) {} delete audioCalls[id]; }
+            $(`sidebar-${id}`)?.remove(); $(`audio-${id}`)?.remove();
+
+            delete connections[id]; delete peerNames[id]; delete lastSeen[id]; delete lastRealPing[id]; pendingConnections.delete(id);
+            // Only drop the file channel entry if it isn't a live channel (chat close != file close).
+            let fileStillOpen = false;
+            try {
+                const fc = fileConns[id];
+                if (fc && !fc.open) delete fileConns[id];
+                else if (fc && fc.open) fileStillOpen = true;
+            } catch (e) { try { delete fileConns[id]; } catch (e2) {} }
+            // F2: chat died but the reliable file channel is still alive — the
+            // peer is reachable, so redial chat instead of showing them as gone.
+            if (fileStillOpen) {
+                addSystemMsg(`⚠️ Chat to <b>${escapeHTML(uname)}</b> dropped (file channel alive) — redialing chat...`);
+                setTimeout(() => { try { connectToPeer(id); } catch (e) {} }, 1200);
+            } else {
+                scheduleRetry(id);
+            }
+            
+            if (!Object.keys(connections).length) { 
+                $('searching-container').style.display = 'flex'; 
+                $('conn-status').innerText = "Searching..."; 
+                $('conn-status').style.color = "#f0b232"; 
+            }
+        }
+
+        $('cam-btn').onclick = async () => {
+            if (camStream) {
+                camStream.getTracks().forEach(t => t.stop()); Object.values(camCalls).forEach(c => c.close());
+                camCalls = {}; camStream = null; $('cam-btn').classList.remove('active'); $('video-me-cam')?.remove(); return;
+            }
+            try {
+                camStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } } 
+                });
+                const camTrack = camStream.getVideoTracks()[0];
+                if (camTrack) camTrack.contentHint = 'fluid';
+                
+                $('cam-btn').classList.add('active'); addVideoElement('me-cam', camStream, true);
+                Object.keys(connections).forEach(id => {
+                    camCalls[id] = peer.call(id, camStream, { metadata: { type: 'webcam' }, sdpTransform: mungeSDP });
+                    applyBitrateLimit(camCalls[id], 500000); 
+                });
+            } catch (err) { console.error(err); }
+        };
+
+        $('screen-btn').onclick = async () => {
+            if (screenStream) {
+                screenStream.getTracks().forEach(t => t.stop()); Object.values(screenCalls).forEach(c => c.close());
+                screenCalls = {}; screenStream = null; $('screen-btn').classList.remove('active'); $('video-me')?.remove(); return;
+            }
+            try {
+                screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+                    video: { frameRate: { ideal: 15, max: 30 } }, 
+                    audio: true 
+                });
+                const screenTrack = screenStream.getVideoTracks()[0];
+                if (screenTrack) screenTrack.contentHint = 'detail';
+                
+                $('screen-btn').classList.add('active'); addVideoElement('me', screenStream, true);
+                screenStream.getVideoTracks()[0].onended = $('screen-btn').onclick;
+                Object.keys(connections).forEach(id => {
+                    screenCalls[id] = peer.call(id, screenStream, { metadata: { type: 'screenshare' }, sdpTransform: mungeSDP });
+                    applyBitrateLimit(screenCalls[id], 1000000);
+                });
+            } catch (err) {}
+        };
+
+        function addVideoElement(id, stream, isLocal) {
+            if ($(`video-${id}`)) return;
+            const v = document.createElement('video');
+            v.id = `video-${id}`; 
+            v.className = 'screen-video'; 
+            v.srcObject = stream; 
+            v.autoplay = true; 
+            v.playsInline = true;
+            v.title = "Click to fullscreen";
+            if (isLocal) v.muted = true;
+            v.onclick = () => v.requestFullscreen?.();
+            v.onpause = () => v.play();
+            $('video-grid').appendChild(v);
+        }
+
+        const bcast = d => {
+            if (d.type && d.type.startsWith('file-')) {
+                Object.values(fileConns).forEach(c => c.open && c.send(d));
+            } else {
+                Object.values(connections).forEach(c => c.open && c.send(d));
+            }
+        };
+        
+        $('send-btn').onclick = () => { 
+            const t = $('msg-input').value; 
+            if(!t||!Object.keys(connections).length) return; 
+            
+            if (amITyping) { amITyping = false; clearTimeout(typingTimeout); bcast({ type: 'typing', state: false }); }
+            
+            bcast({type:'text',value:t}); 
+            addMessage(linkify(escapeHTML(t)), "You", 'mine'); 
+            $('msg-input').value = ""; 
+        };
+        $('msg-input').addEventListener('keypress', e => { if (e.key === 'Enter') $('send-btn').click(); });
+
+        $('msg-input').addEventListener('input', () => {
+            if (!amITyping && $('msg-input').value.trim() !== "") {
+                amITyping = true;
+                bcast({ type: 'typing', state: true });
+            }
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {
+                if (amITyping) {
+                    amITyping = false;
+                    bcast({ type: 'typing', state: false });
+                }
+            }, 500); 
+        });
+
+        function updateTypingUI() {
+            const ind = $('typing-indicator');
+            if (typingUsers.size === 0) {
+                ind.classList.remove('active');
+                ind.innerText = "";
+            } else {
+                ind.classList.add('active');
+                const arr = Array.from(typingUsers);
+                if (arr.length === 1) ind.innerText = `${arr[0]} is typing...`;
+                else if (arr.length === 2) ind.innerText = `${arr[0]} and ${arr[1]} are typing...`;
+                else ind.innerText = `Several people are typing...`;
+            }
+        }
+
+        let dragCounter = 0;
+        const dropOverlay = $('drop-overlay');
+
+        document.addEventListener('dragenter', e => {
+            if ($('login-screen').style.display !== 'none') return;
+            e.preventDefault();
+            dragCounter++;
+            dropOverlay.style.display = 'flex';
+        });
+
+        document.addEventListener('dragover', e => {
+            if ($('login-screen').style.display !== 'none') return;
+            e.preventDefault();
+        });
+
+        document.addEventListener('dragleave', () => {
+            if ($('login-screen').style.display !== 'none') return;
+            dragCounter--;
+            if (dragCounter === 0) dropOverlay.style.display = 'none';
+        });
+
+        document.addEventListener('drop', async e => {
+            if ($('login-screen').style.display !== 'none') return;
+            e.preventDefault();
+            dragCounter = 0;
+            dropOverlay.style.display = 'none';
+
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                const files = Array.from(e.dataTransfer.files);
+                // Audio dropped = soundboard play (first audio only, legacy behavior); everything else queued.
+                if (files.length === 1 && (files[0].type || '').startsWith('audio/')) {
+                    const file = files[0];
+                    if (Object.keys(connections).length === 0) {
+                        return addSystemMsg("❌ No one is in the room to hear sounds!");
+                    }
+                    addSystemMsg(`Playing <b>${escapeHTML(file.name)}</b> to the room...`);
+                    const buffer = await file.arrayBuffer();
+                    playCustomSound(buffer, file.type, null);
+                    const url = URL.createObjectURL(new Blob([buffer], { type: file.type }));
+                    addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${escapeHTML(file.name)}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
+                    bcast({ type: 'play-sound', buffer: buffer, mime: file.type, name: file.name });
+                } else {
+                    // Queue ALL dropped files sequentially (per-peer order preserved, peers independent).
+                    for (const f of files) { try { await v2EnqueueFile(f); } catch (err) { console.warn('enqueue failed', err); } }
+                    if (files.length > 1) addSystemMsg(`📦 Queued <b>${files.length}</b> files...`);
+                }
+            }
+        });
+
+        // Durable sender entry point. Queued sequentially; per-peer sessions are independent
+        // so one stalled peer/file never blocks other peers or later files for healthy peers.
+        async function sendFile(file) { return v2EnqueueFile(file); }
+        async function sendFiles(files) {
+            if (!files || !files.length) return;
+            for (const f of files) { try { await v2EnqueueFile(f); } catch (e) { console.warn('enqueue failed', e); } }
+            if (files.length > 1) addSystemMsg(`📦 Queued <b>${files.length}</b> files...`);
+        }
+
+        $('file-input').onchange = () => {
+            const files = Array.from($('file-input').files || []);
+            if (files.length) sendFiles(files);
+            $('file-input').value = "";
+        };
+
+        document.addEventListener('paste', (e) => {
+            if (e.clipboardData && e.clipboardData.files.length > 0) {
+                const files = Array.from(e.clipboardData.files).filter(f => (f.type || '').startsWith('image/') || (f.type || '').startsWith('video/'));
+                if (!files.length) return;
+                const renamed = files.map(file => {
+                    const ext = (file.type.split('/')[1] || 'bin').split(';')[0];
+                    return new File([file], `Pasted Media - ${new Date().toLocaleTimeString()}.${ext}`, { type: file.type });
+                });
+                sendFiles(renamed);
+            }
+        });
+
+        $('soundboard-input').onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            waitingForKeyBind = { buffer: await file.arrayBuffer(), mime: file.type, name: file.name };
+            addSystemMsg(`Press a <b>Numpad key (0-9)</b> to bind the sound <b>${file.name}</b>...`);
+            e.target.value = "";
+        };
+
+        document.addEventListener('keydown', (e) => {
+            if ($('login-screen').style.display !== 'none') return;
+            
+            if ((e.key === '*' && e.target.tagName !== 'INPUT') || e.code === 'NumpadMultiply') {
+                for (let k in soundboard) delete soundboard[k];
+                waitingForKeyBind = null;
+                addSystemMsg("🧹 Cleared all Numpad sound bindings.");
+                return;
+            }
+
+            const match = e.code.match(/^Numpad(\d)$/);
+            if (!match) return;
+            const num = match[1];
+
+            if (waitingForKeyBind) {
+                soundboard[num] = waitingForKeyBind;
+                addSystemMsg(`🎵 Bound <b>${waitingForKeyBind.name}</b> to Numpad <b>${num}</b>.`);
+                waitingForKeyBind = null;
+                return;
+            }
+
+            if (soundboard[num]) {
+                if (Object.keys(connections).length === 0) {
+                    return addSystemMsg("❌ No one is in the room to hear that!");
+                }
+                playCustomSound(soundboard[num].buffer, soundboard[num].mime, null);
+                const url = URL.createObjectURL(new Blob([soundboard[num].buffer], { type: soundboard[num].mime }));
+                addMessage(`<audio src="${url}" controls></audio><a href="${url}" download="${soundboard[num].name}" class="chat-media-link">${dlIcon} Download Audio</a>`, "You", 'mine');
+                bcast({ type: 'play-sound', buffer: soundboard[num].buffer, mime: soundboard[num].mime, name: soundboard[num].name });
+            }
+        });
+
+        function playCustomSound(buffer, mime, senderId) {
+            try {
+                const blob = new Blob([buffer], { type: mime });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                
+                if (senderId) {
+                    const volSlider = $(`vol-${senderId}`);
+                    if (volSlider) {
+                        audio.volume = parseFloat(volSlider.value);
+                    }
+                    
+                    const muteIcon = $(`mute-icon-${senderId}`);
+                    if (muteIcon && muteIcon.innerText === "🔇") {
+                        audio.muted = true;
+                    }
+
+                    if (!activeSounds[senderId]) activeSounds[senderId] = [];
+                    activeSounds[senderId].push(audio);
+                }
+
+                audio.play().catch(err => console.log("Sound play prevented:", err));
+                audio.onended = () => {
+                    URL.revokeObjectURL(url); 
+                    if (senderId && activeSounds[senderId]) {
+                        activeSounds[senderId] = activeSounds[senderId].filter(a => a !== audio);
+                    }
+                };
+            } catch (err) {}
+        }
+
+
+        setInterval(() => {
+            const peers = Object.keys(connections);
+            if(peers.length) bcast({ type: 'mesh-sync', peers });
+            if (myId !== ROOM_ID && !connections[ROOM_ID]) connectToPeer(ROOM_ID);
+            // F1: fully isolated but we remember peers (total split, host gone).
+            // Redial one remembered peer per tick with backoff instead of staying dark.
+            if (!peers.length && myId) {
+                try {
+                    for (const pid of Array.from(knownPeerIds)) {
+                        if (pid && pid !== myId && !connections[pid] && !pendingConnections.has(pid)) { connectToPeer(pid); break; }
+                    }
+                } catch (e) {}
+            }
+            // F2: chat missing but reliable file channel alive -> redial chat.
+            try {
+                for (const sid of Object.keys(fileConns)) {
+                    if (sid !== myId && fileConns[sid] && fileConns[sid].open && !connections[sid] && !pendingConnections.has(sid)) connectToPeer(sid);
+                }
+            } catch (e) {}
+        }, 3000);
+
+        async function checkConnectionTypes() {
+            for (const id of Object.keys(connections)) {
+                const conn = connections[id];
+                if (!conn || !conn.peerConnection) continue;
+                try {
+                    const stats = await conn.peerConnection.getStats();
+                    let type = '?';
+                    stats.forEach(report => {
+                        if (report.type === 'transport' && report.selectedCandidatePairId) {
+                            const pair = stats.get(report.selectedCandidatePairId);
+                            if (pair && pair.localCandidateId) {
+                                const localCandidate = stats.get(pair.localCandidateId);
+                                if (localCandidate) type = localCandidate.candidateType;
+                            }
+                        }
+                    });
+                    const icon = $(`conn-type-${id}`);
+                    if (icon) {
+                        if (type === 'host') { icon.innerText = '⚡'; icon.title = 'Direct Connection (Host)'; }
+                        else if (type === 'srflx' || type === 'prflx') { icon.innerText = '🌐'; icon.title = 'Indirect Connection (STUN)'; }
+                        else if (type === 'relay') { icon.innerText = '☁️'; icon.title = 'Relayed Connection (TURN)'; }
+                    }
+                } catch(e) {}
+            }
+        }
+
+        setInterval(() => {
+            bcast({ type: 'ping', time: Date.now() });
+            // F6: reliable heartbeat alongside the unreliable ping. lastSeen is
+            // refreshed by EITHER path, so transient loss on the unreliable chat
+            // channel no longer looks like a departure.
+            try {
+                for (const sid of Object.keys(fileConns)) {
+                    try { if (fileConns[sid] && fileConns[sid].open) fileConns[sid].send({ type: 'hb', time: Date.now() }); } catch (e) {}
+                }
+            } catch (e) {}
+            checkConnectionTypes();
+        }, 1000);
+
+        document.addEventListener('visibilitychange', () => {
+            // F7: coming back from sleep/hidden tab, immediately re-announce
+            // instead of waiting up to 3s for the next gossip tick.
+            if (document.visibilityState === 'visible' && myId) {
+                try {
+                    const peers = Object.keys(connections);
+                    if (peers.length) bcast({ type: 'mesh-sync', peers });
+                    if (myId !== ROOM_ID && !connections[ROOM_ID]) connectToPeer(ROOM_ID);
+                    for (const sid of Object.keys(fileConns)) {
+                        try { if (fileConns[sid] && fileConns[sid].open) v2SendHello(sid); } catch (e) {}
+                    }
+                } catch (e) {}
+            }
+        });
+
+        setInterval(() => {
+            // F7: background tabs get throttled timers; evicting on wall-clock
+            // time alone mass-removes everyone during sleep. Skip eviction while
+            // hidden — presence resyncs on visibilitychange instead.
+            if (document.hidden) return;
+            const now = Date.now();
+            Object.keys(connections).forEach(id => {
+                const elapsed = now - (lastSeen[id] || now);
+
+                if (elapsed > 15000) {
+                    removePeer(id);
+                } else if (elapsed > 1000) {
+                    const basePing = lastRealPing[id] || 0;
+                    const simulatedPing = Math.floor(basePing + (elapsed - 1000));
+                    updatePingUI(id, simulatedPing);
+                }
+            });
+        }, 100);
+
+        function updatePingUI(id, lat) { 
+            const p = $(`ping-${id}`); 
+            const dot = $(`status-dot-${id}`);
+            
+            if(p){ 
+                p.innerText = `${lat}ms`; 
+                p.className = `ping-display ${lat<100?'ping-good':lat<300?'ping-med':'ping-bad'}`; 
+            }
+            if(dot && id !== 'me'){ 
+                dot.className = `status-dot ${lat<100?'dot-good':lat<300?'dot-med':'dot-bad'}`;
+            }
+        }
+
+        function enableChat() { $('msg-input').disabled = $('send-btn').disabled = false; }
+        
+        // Ensure manual logout button overrides the safety check.
+        // Broadcast an explicit leave so peers don't wait out the 15s timeout.
+        $('logout-btn').onclick = () => {
+            window.onbeforeunload = null;
+            try { bcast({ type: 'leave' }); } catch (e) {}
+            try { if (peer && !peer.destroyed) peer.destroy(); } catch (e) {}
+            setTimeout(() => location.reload(), 150);
+        };
+
+        function addMessage(html, user, type, msgId = null) { 
+            const d = document.createElement('div'); 
+            d.className = `msg ${type}`; 
+            if (msgId) d.id = msgId;
+            d.innerHTML = `<div class="msg-info">${user}</div><div>${html}</div>`; 
+            $('messages').appendChild(d); 
+            
+            const scrollToBottom = () => $('messages').scrollTop = $('messages').scrollHeight;
+            scrollToBottom(); 
+
+            const medias = d.querySelectorAll('img, video, audio');
+            medias.forEach(m => {
+                m.onload = m.onloadedmetadata = scrollToBottom; 
+            });
+        }
+        
+        function addSystemMsg(txt) { 
+            const d = document.createElement('div'); 
+            d.style.cssText = "text-align:center;font-size:12px;font-weight:500;color:#949ba4;margin:10px 0"; 
+            d.innerHTML = txt; 
+            $('messages').appendChild(d);
+            $('messages').scrollTop = $('messages').scrollHeight;
+        }
+
+        function addUserToSidebar(name, id) {
+            if ($(`sidebar-${id}`)) { $(`name-${id}`).innerText = name; return; }
+            const d = document.createElement('div'); d.className = 'user-item'; d.id = `sidebar-${id}`;
+            
+            let right = "";
+            if (id === "me") {
+                right = `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="my-mic-toggle" style="font-size:14px;cursor:pointer;user-select:none;transition:0.2s;" title="Toggle Mic">🎤</span></div>`;
+            } else {
+                right = `<div style="display:flex;align-items:center;gap:5px;margin-right:8px"><span id="mute-icon-${id}" style="font-size:14px;opacity:0.8;cursor:pointer;user-select:none;transition:0.2s;" title="Mute/Unmute">🔊</span><input type="range" class="vol-slider" id="vol-${id}" min="0" max="1" step="0.05" value="1"></div><span id="conn-type-${id}" style="font-size:14px; margin-right:4px;" title="Determining connection...">🔄</span><span id="ping-${id}" class="ping-display ping-med">-- ms</span>`;
+            }
+
+            d.innerHTML = `<div class="user-left"><div id="status-dot-${id}" class="status-dot dot-good"></div><span id="name-${id}" title="${name}${id==="me"?" (You)":""}">${name}${id==="me"?" (You)":""}</span></div><div style="display:flex;gap:8px;align-items:center;">${right}</div>`;
+            $('user-list').appendChild(d);
+            
+            if (id === "me") {
+                const myMicToggle = $('my-mic-toggle');
+                if (!localStream) {
+                    myMicToggle.style.display = 'none'; 
+                } else {
+                    myMicToggle.onclick = () => {
+                        isMuted = !isMuted;
+                        localStream.getAudioTracks()[0].enabled = !isMuted;
+                        myMicToggle.innerText = isMuted ? "🔇" : "🎤";
+                        myMicToggle.style.opacity = isMuted ? "0.5" : "1";
+                    };
+                }
+            } else {
+                const muteIcon = $(`mute-icon-${id}`);
+                const volSlider = $(`vol-${id}`);
+                let isUserMuted = false;
+                let previousVolume = 1;
+
+                muteIcon.onclick = () => {
+                    isUserMuted = !isUserMuted;
+                    muteIcon.innerText = isUserMuted ? "🔇" : "🔊";
+                    muteIcon.style.opacity = isUserMuted ? "0.5" : "0.8";
+                    
+                    const a = $(`audio-${id}`);
+
+                    if (isUserMuted) {
+                        previousVolume = parseFloat(volSlider.value) > 0 ? parseFloat(volSlider.value) : 1;
+                        volSlider.value = 0;
+                        if (a) { a.muted = true; a.volume = 0; }
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = true; snd.volume = 0; });
+                    } else {
+                        volSlider.value = previousVolume;
+                        if (a) { a.muted = false; a.volume = previousVolume; }
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => { snd.muted = false; snd.volume = previousVolume; });
+                    }
+                };
+
+                volSlider.addEventListener('input', e => { 
+                    const vol = parseFloat(e.target.value);
+                    const a = $(`audio-${id}`); 
+                    if(a) a.volume = vol; 
+                    
+                    if (activeSounds[id]) {
+                        activeSounds[id].forEach(snd => snd.volume = vol);
+                    }
+
+                    if (vol === 0 && !isUserMuted) {
+                        isUserMuted = true;
+                        muteIcon.innerText = "🔇";
+                        muteIcon.style.opacity = "0.5";
+                        if (a) a.muted = true;
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = true);
+                    } 
+                    else if (isUserMuted && vol > 0) {
+                        isUserMuted = false;
+                        muteIcon.innerText = "🔊";
+                        muteIcon.style.opacity = "0.8";
+                        if (a) a.muted = false;
+                        if (activeSounds[id]) activeSounds[id].forEach(snd => snd.muted = false);
+                    }
+                });
+            }
+        }
+    </script>
+</body>
+</html>
