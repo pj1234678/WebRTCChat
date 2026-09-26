@@ -201,7 +201,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
    ============================================================ */
 const $ = s => document.querySelector(s);
 const pad2 = n => String(n).padStart(2,'0');
-const fmtBytes = b => b<1024? b+' B' : b<1048576? (b/1024).toFixed(1)+' KB' : (b/1048576).toFixed(2)+' MB';
+const fmtBytes = b => b<1024? b+' B' : b<1048576? (b/1024).toFixed(1)+' KB' : b<1073741824? (b/1048576).toFixed(2)+' MB' : b<1099511627776? (b/1073741824).toFixed(2)+' GB' : (b/1099511627776).toFixed(2)+' TB';
 const fmtETA = s => s==null? '—' : s<60? s+'s' : Math.floor(s/60)+'m '+pad2(s%60)+'s';
 function toast(m){ const t=$('#toast'); t.textContent=m; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',2500); }
 function showErr(m){ const b=$('#errBanner'); b.textContent=m; b.style.display='block'; }
@@ -437,22 +437,23 @@ function publicView(tr){ if(!tr) return null; const done=tr.role==='send'?tr.ack
   return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.ackedBytes||tr.receivedBytes||0,cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,needsSave:!!(tr.role==='recv'&&tr.complete&&!tr.cancelled&&!tr.url&&tr.opfsHandle),confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
 const CRC_T=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; } return t; })();
 function crc32(data){ let c=0xFFFFFFFF; for(let i=0;i<data.length;i++) c=CRC_T[(c^data[i])&0xFF]^(c>>>8); return ((c^0xFFFFFFFF)>>>0).toString(16).padStart(8,'0'); }
+const num=n=>Math.floor(Number(n)); // full 53-bit size/index, never >>>0 (wraps past 4GiB)
 const hexB=h=>[...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,'0')).join('');
 async function chainHash(total,readSlice){ // chained SHA-256 over sequential slices, O(1) memory for any file size
   if(!crypto.subtle) return null; const STEP=4*1024*1024; let h=new Uint8Array(0);
-  if((total>>>0)===0){ return hexB(await crypto.subtle.digest('SHA-256',new Uint8Array(0))); }
+  if(num(total)===0){ return hexB(await crypto.subtle.digest('SHA-256',new Uint8Array(0))); }
   for(let off=0;off<total;off+=STEP){ const part=await readSlice(off,Math.min(total,off+STEP)); const buf=new Uint8Array(h.length+part.length); buf.set(h,0); buf.set(part,h.length); h=new Uint8Array(await crypto.subtle.digest('SHA-256',buf)); }
   return hexB(h.buffer); }
 function trackSpeed(tr,add){ const t=nowT(); tr.samples=tr.samples||[]; tr.ackedBytes=(tr.ackedBytes||0)+add; tr.samples.push({t,b:tr.ackedBytes}); while(tr.samples.length>2&&t-tr.samples[0].t>SPEED_WINDOW) tr.samples.shift();
   if(tr.samples.length>=2){ const f=tr.samples[0],l=tr.samples[tr.samples.length-1]; const dt=(l.t-f.t)/1000,db=l.b-f.b; const v=dt>0.05?db/dt:0; tr.speedMBs=v/(1024*1024); tr.etaSec=v>1?Math.ceil((tr.size-tr.ackedBytes)/v):null; } else { tr.speedMBs=0; tr.etaSec=null; } }
 async function opfsDir(){ try{ if(!navigator.storage||typeof navigator.storage.getDirectory!=='function') return null; return await navigator.storage.getDirectory(); }catch(_){ return null; } }
-async function sendFileV2(file,target){ if(!file) throw new Error('no file'); const tgt=target||'broadcast'; const id=uid(); const size=file.size>>>0; const total=Math.max(1,Math.ceil(size/CHUNK));
+async function sendFileV2(file,target){ if(!file) throw new Error('no file'); const tgt=target||'broadcast'; const id=uid(); const size=num(file.size); const total=Math.max(1,Math.ceil(size/CHUNK));
   const tr={id,role:'send',file,name:file.name||'unnamed',size,total,fileType:file.type||'application/octet-stream',target:tgt,senderPeer:null,selfId:null,cwnd:4,ssthresh:64,rttCount:0,nextIdx:0,retryQueue:[],inFlight:new Map(),acked:new Set(),confirmations:new Set(),paused:false,cancelled:false,done:false,complete:false,startTime:nowT(),samples:[],ackedBytes:0,speedMBs:0,etaSec:null,hash:null,pumpRunning:false};
   try{ tr.selfId=(window.Search&&(window.Search.myId))||null; }catch(_){}
   transfers.set(id,tr);
   netSend(tgt,{t:'file-announce',id,name:tr.name,size,total,fileType:tr.fileType,sender:tr.selfId});
   uiUpdate(tr); uiRender(); pumpSender(tr).catch(()=>{});
-  chainHash(file.size>>>0,async (o,e)=>new Uint8Array(await file.slice(o,e).arrayBuffer())).then(h=>{ if(!h||tr.cancelled) return; tr.hash=h; netSend(tgt,{t:'file-hash',id,sha256:h}); uiUpdate(tr); }).catch(()=>{});
+  chainHash(file.size,async (o,e)=>new Uint8Array(await file.slice(o,e).arrayBuffer())).then(h=>{ if(!h||tr.cancelled) return; tr.hash=h; netSend(tgt,{t:'file-hash',id,sha256:h}); uiUpdate(tr); }).catch(()=>{});
   return id; }
 async function sendOneChunk(tr,idx){ const off=idx*CHUNK,end=Math.min(tr.size,off+CHUNK); let buf; try{ buf=await tr.file.slice(off,end).arrayBuffer(); }catch(e){ tr.error='slice-failed'; uiUpdate(tr); return; }
   const u8=new Uint8Array(buf), crc=crc32(u8), payload=u8.buffer.slice(0);
@@ -470,7 +471,7 @@ function onAck(tr,idx){ const inf=tr.inFlight.get(idx); if(inf){ try{clearTimeou
   if(!tr.acked.has(idx)){ tr.acked.add(idx); trackSpeed(tr,chunkLen(idx,tr.total,tr.size)); increaseCongestion(tr); }
   if(tr.acked.size>=tr.total) finishSend(tr); else pumpSender(tr).catch(()=>{}); uiUpdate(tr); }
 function onChunkTimeout(tid,idx){ const tr=transfers.get(tid); if(!tr||tr.role!=='send'||tr.cancelled||tr.done) return; if(tr.acked.has(idx)) return; tr.inFlight.delete(idx); decreaseCongestion(tr); if(!tr.retryQueue.includes(idx)) tr.retryQueue.unshift(idx); uiUpdate(tr); pumpSender(tr).catch(()=>{}); }
-function onMissing(tr,missing){ if(!Array.isArray(missing)||!missing.length) return; let applied=false; for(const raw of missing.slice(0,500)){ const idx=raw>>>0; if(idx>=tr.total) continue; if(tr.acked.has(idx)) tr.acked.delete(idx); const inf=tr.inFlight.get(idx); if(inf){ try{clearTimeout(inf.timer);}catch(_){} tr.inFlight.delete(idx); } if(!tr.retryQueue.includes(idx)) tr.retryQueue.push(idx); applied=true; }
+function onMissing(tr,missing){ if(!Array.isArray(missing)||!missing.length) return; let applied=false; for(const raw of missing.slice(0,500)){ const idx=num(raw); if(idx>=tr.total) continue; if(tr.acked.has(idx)) tr.acked.delete(idx); const inf=tr.inFlight.get(idx); if(inf){ try{clearTimeout(inf.timer);}catch(_){} tr.inFlight.delete(idx); } if(!tr.retryQueue.includes(idx)) tr.retryQueue.push(idx); applied=true; }
   if(applied){ decreaseCongestion(tr); if(!tr.paused&&!tr.cancelled&&!tr.done) pumpSender(tr).catch(()=>{}); uiUpdate(tr); } }
 function finishSend(tr){ if(tr.done) return; tr.done=true; tr.complete=true; for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); tr.speedMBs=0; tr.etaSec=0; uiUpdate(tr); uiRender(); }
 function pauseTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send') return false; tr.paused=true; uiUpdate(tr); return true; }
@@ -483,7 +484,7 @@ async function ensureRecvEntry(msg,peerId){ let tr=transfers.get(msg.id);
   if(tr){ // re-announce (e.g. sender came back with a new peer ID after redial): adopt the live sender
     if(tr.role==='recv'){ if(peerId&&tr.senderPeer!==peerId) tr.senderPeer=peerId; if(msg.sha256&&!tr.expectedHash) tr.expectedHash=String(msg.sha256).toLowerCase(); }
     return tr; }
-  tr={id:msg.id,role:'recv',name:sanitize(msg.name),size:msg.size>>>0,total:msg.total>>>0,fileType:msg.fileType||'application/octet-stream',senderPeer:peerId||msg.sender||null,target:null,chunks:new Map(),receivedSet:new Set(),receivedCount:0,receivedBytes:0,ackedBytes:0,expectedHash:msg.sha256||null,done:false,complete:false,paused:false,cancelled:false,startTime:nowT(),samples:[],speedMBs:0,etaSec:null,useOPFS:false,writable:null,writeLock:Promise.resolve(),opfsHandle:null,opfsName:null,lastActivity:nowT(),missingTimer:null,url:null,blob:null,isImage:String(msg.fileType||'').startsWith('image/'),hashOk:null,error:null};
+  tr={id:msg.id,role:'recv',name:sanitize(msg.name),size:num(msg.size),total:num(msg.total),fileType:msg.fileType||'application/octet-stream',senderPeer:peerId||msg.sender||null,target:null,chunks:new Map(),receivedSet:new Set(),receivedCount:0,receivedBytes:0,ackedBytes:0,expectedHash:msg.sha256||null,done:false,complete:false,paused:false,cancelled:false,startTime:nowT(),samples:[],speedMBs:0,etaSec:null,useOPFS:false,writable:null,writeLock:Promise.resolve(),opfsHandle:null,opfsName:null,lastActivity:nowT(),missingTimer:null,url:null,blob:null,isImage:String(msg.fileType||'').startsWith('image/'),hashOk:null,error:null};
   if(!tr.total||tr.total<=0) return null; transfers.set(tr.id,tr);
   try{ const dir=await opfsDir(); if(dir){ const nm='smc-'+tr.id+'-'+tr.name; const h=await dir.getFileHandle(nm,{create:true}); const w=await h.createWritable(); tr.opfsName=nm; tr.opfsHandle=h; tr.writable=w; tr.useOPFS=true; } }catch(_){ tr.useOPFS=false; tr.writable=null; }
   if(!tr.useOPFS&&tr.size>MEMORY_MAX){ // no disk backing and too big to hold in RAM: refuse instead of OOM
@@ -492,7 +493,7 @@ async function ensureRecvEntry(msg,peerId){ let tr=transfers.get(msg.id);
     uiUpdate(tr); uiRender(); return tr; }
   tr.missingTimer=setInterval(()=>requestMissingIfStalled(tr.id),MISSING_INTERVAL); uiUpdate(tr); uiRender(); return tr; }
 function toU8(d){ if(d instanceof Uint8Array) return d; if(d instanceof ArrayBuffer) return new Uint8Array(d); if(Array.isArray(d)) return Uint8Array.from(d); return null; }
-async function onChunkRecv(tr,msg,peerId){ if(tr.done||tr.cancelled||tr.complete||tr.paused) return; const idx=msg.idx>>>0; if(idx>=tr.total) return;
+async function onChunkRecv(tr,msg,peerId){ if(tr.done||tr.cancelled||tr.complete||tr.paused) return; const idx=num(msg.idx); if(idx>=tr.total) return;
   if(tr.receivedSet.has(idx)){ netSendTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); return; }
   const u8=toU8(msg.data); if(!u8){ netSendTo(tr.senderPeer||peerId,{t:'file-missing',id:tr.id,missing:[idx]}); return; }
   if(msg.crc&&String(msg.crc).toLowerCase()!==String(crc32(u8)).toLowerCase()){ netSendTo(tr.senderPeer||peerId,{t:'file-missing',id:tr.id,missing:[idx]}); return; }
@@ -511,7 +512,7 @@ function verifyRecvHash(tr){ if(!tr||tr.verifying||tr.hashOk!==null) return; tr.
     if(!tr.expectedHash||!crypto.subtle){ tr.verifying=false; return; }
     const src=tr.blob||(tr.opfsHandle?await tr.opfsHandle.getFile():null);
     if(!src){ tr.verifying=false; return; }
-    const h=await chainHash(src.size>>>0,async (o,e)=>new Uint8Array(await src.slice(o,e).arrayBuffer()));
+    const h=await chainHash(src.size,async (o,e)=>new Uint8Array(await src.slice(o,e).arrayBuffer()));
     if(h){ tr.hashOk=(h.toLowerCase()===String(tr.expectedHash).toLowerCase()); if(!tr.hashOk) tr.error='hash-mismatch'; }
   }catch(_){ tr.hashOk=null; } tr.verifying=false; uiUpdate(tr); uiRender(); })(); }
 async function assembleRecv(id){ const tr=transfers.get(id); if(!tr||tr.role!=='recv'||tr.complete||tr.cancelled) return; try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} tr.missingTimer=null;
@@ -555,7 +556,7 @@ async function handleFileMsg(msg,peerId){ try{ if(!msg||typeof msg.t!=='string')
       case 'file-announce': if(msg.id==null||msg.size==null||msg.total==null) return true; { const tr=await ensureRecvEntry(msg,peerId); if(tr&&tr.role==='recv'&&!tr.done&&!tr.complete&&!tr.cancelled&&tr.receivedCount>0&&tr.receivedCount<tr.total){ tr.lastActivity=0; try{ requestMissingIfStalled(tr.id); }catch(_){} } } return true;
       case 'file-hash': { const tr=transfers.get(msg.id); if(tr&&tr.role==='recv'){ tr.expectedHash=String(msg.sha256||'').toLowerCase()||null; if(tr.complete&&!tr.cancelled) verifyRecvHash(tr); uiUpdate(tr); } return true; }
       case 'file-chunk': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='recv') return true; if(peerId&&tr.senderPeer!==peerId) tr.senderPeer=peerId; await onChunkRecv(tr,msg,peerId); return true; }
-      case 'file-ack': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='send') return true; onAck(tr,msg.idx>>>0); return true; }
+      case 'file-ack': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='send') return true; onAck(tr,num(msg.idx)); return true; }
       case 'file-missing': { const tr=transfers.get(msg.id); if(!tr) return true; if(tr.role==='send') onMissing(tr,msg.missing); return true; }
       case 'file-done-ack': { const tr=transfers.get(msg.id); if(tr&&tr.role==='send'&&peerId){ tr.confirmations.add(peerId); uiUpdate(tr); } return true; }
       case 'file-cancel': { const tr=transfers.get(msg.id); if(tr&&!tr.complete){ tr.cancelled=true; if(tr.role==='send'){ for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); } else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } } uiUpdate(tr); uiRender(); } return true; }
