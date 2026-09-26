@@ -478,7 +478,10 @@ function cancelTransfer(id){ const tr=transfers.get(id); if(!tr) return false; t
   if(tr.role==='send'){ for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); netSend(tr.target,{t:'file-cancel',id:tr.id}); }
   else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } if(tr.senderPeer) netSendTo(tr.senderPeer,{t:'file-cancel',id:tr.id}); }
   uiUpdate(tr); uiRender(); return true; }
-async function ensureRecvEntry(msg,peerId){ let tr=transfers.get(msg.id); if(tr) return tr;
+async function ensureRecvEntry(msg,peerId){ let tr=transfers.get(msg.id);
+  if(tr){ // re-announce (e.g. sender came back with a new peer ID after redial): adopt the live sender
+    if(tr.role==='recv'){ if(peerId&&tr.senderPeer!==peerId) tr.senderPeer=peerId; if(msg.sha256&&!tr.expectedHash) tr.expectedHash=String(msg.sha256).toLowerCase(); }
+    return tr; }
   tr={id:msg.id,role:'recv',name:sanitize(msg.name),size:msg.size>>>0,total:msg.total>>>0,fileType:msg.fileType||'application/octet-stream',senderPeer:peerId||msg.sender||null,target:null,chunks:new Map(),receivedSet:new Set(),receivedCount:0,receivedBytes:0,ackedBytes:0,expectedHash:msg.sha256||null,done:false,complete:false,paused:false,cancelled:false,startTime:nowT(),samples:[],speedMBs:0,etaSec:null,useOPFS:false,writable:null,writeLock:Promise.resolve(),opfsHandle:null,lastActivity:nowT(),missingTimer:null,url:null,blob:null,isImage:String(msg.fileType||'').startsWith('image/'),hashOk:null,error:null};
   if(!tr.total||tr.total<=0) return null; transfers.set(tr.id,tr);
   if(tr.size>OPFS_THRESHOLD){ try{ const dir=await opfsDir(); if(dir){ const h=await dir.getFileHandle('smc-'+tr.id+'-'+tr.name,{create:true}); const w=await h.createWritable(); tr.opfsHandle=h; tr.writable=w; tr.useOPFS=true; } }catch(_){ tr.useOPFS=false; tr.writable=null; } }
@@ -505,12 +508,18 @@ async function assembleRecv(id){ const tr=transfers.get(id); if(!tr||tr.role!=='
     try{ netSendTo(tr.senderPeer,{t:'file-done-ack',id:tr.id}); }catch(_){}
     uiUpdate(tr); uiRender(); }
   catch(e){ tr.error=String((e&&e.message)||e); uiUpdate(tr); } }
-function handleHello(peerId){ if(!peerId) return; for(const tr of transfers.values()){ if(tr.role!=='send'||tr.cancelled||tr.done) continue; try{ const ann={t:'file-announce',id:tr.id,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.selfId}; if(tr.hash) ann.sha256=tr.hash; netSendTo(peerId,ann); }catch(_){} } }
+function handleHello(peerId){ if(!peerId) return; let me=null; try{ me=window.Search&&window.Search.myId; }catch(_){}
+  for(const tr of transfers.values()){ if(tr.cancelled||tr.done) continue;
+    if(tr.role!=='send') continue;
+    if(me&&tr.selfId!==me) tr.selfId=me; // we may have reclaimed a new peer ID since the transfer started
+    try{ const ann={t:'file-announce',id:tr.id,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.selfId}; if(tr.hash) ann.sha256=tr.hash; netSendTo(peerId,ann); }catch(_){}
+    try{ pumpSender(tr).catch(()=>{}); }catch(_){} // nudge stalled senders now that a peer is back
+  } }
 async function handleFileMsg(msg,peerId){ try{ if(!msg||typeof msg.t!=='string') return false; if(msg.t==='hello'){ handleHello(peerId); return false; } if(!msg.t.startsWith('file-')) return false;
     switch(msg.t){
-      case 'file-announce': if(msg.id==null||msg.size==null||msg.total==null) return true; await ensureRecvEntry(msg,peerId); return true;
+      case 'file-announce': if(msg.id==null||msg.size==null||msg.total==null) return true; { const tr=await ensureRecvEntry(msg,peerId); if(tr&&tr.role==='recv'&&!tr.done&&!tr.complete&&!tr.cancelled&&tr.receivedCount>0&&tr.receivedCount<tr.total){ tr.lastActivity=0; try{ requestMissingIfStalled(tr.id); }catch(_){} } } return true;
       case 'file-hash': { const tr=transfers.get(msg.id); if(tr&&tr.role==='recv'){ tr.expectedHash=String(msg.sha256||'').toLowerCase()||null; uiUpdate(tr); } return true; }
-      case 'file-chunk': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='recv') return true; if(peerId&&!tr.senderPeer) tr.senderPeer=peerId; await onChunkRecv(tr,msg,peerId); return true; }
+      case 'file-chunk': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='recv') return true; if(peerId&&tr.senderPeer!==peerId) tr.senderPeer=peerId; await onChunkRecv(tr,msg,peerId); return true; }
       case 'file-ack': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='send') return true; onAck(tr,msg.idx>>>0); return true; }
       case 'file-missing': { const tr=transfers.get(msg.id); if(!tr) return true; if(tr.role==='send') onMissing(tr,msg.missing); return true; }
       case 'file-done-ack': { const tr=transfers.get(msg.id); if(tr&&tr.role==='send'&&peerId){ tr.confirmations.add(peerId); uiUpdate(tr); } return true; }
