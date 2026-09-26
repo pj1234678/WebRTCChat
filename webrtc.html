@@ -306,7 +306,13 @@ function attachPeer(p,hostMode){
     else { console.warn('[SMC] peer error',type||err); noteError('Peer error: '+(type||'unknown')); } });
 }
 function onPeerUnavailable(){
-  // We dialed an ID the server doesn't know: room has no host (yet). Redial keeps running.
+  // PeerJS reports peer-unavailable for ANY failed dial (stale guest redials, bulk dials),
+  // not just the room host. Only warn when the host is actually missing.
+  try{
+    if(isHost) return;
+    const h=peers.get(ROOM_ID);
+    if(h&&h.conn&&h.conn.open) return;
+  }catch(e){}
   const k='pu:'+ROOM_ID, nowPu=Date.now(), lastPu=errSeen.get(k)||0;
   if(nowPu-lastPu<60000) return; errSeen.set(k,nowPu);
   noteError('Room "'+currentPass()+'" has no host online (peer-unavailable). Keep this window open, then Join from a 2nd window/device with the SAME password — the first one in becomes host.');
