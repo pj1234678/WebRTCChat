@@ -175,7 +175,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     </form>
     <div class="side-h"><span>Peers — <span id="peerCountSide">0</span></span><span>mesh</span></div>
     <div id="peerList"></div>
-    <div class="self-note">v2.8 • Drag right edge to resize • &lt;900px becomes drawer</div>
+    <div class="self-note">v2.9 • Drag right edge to resize • &lt;900px becomes drawer</div>
     <details id="diagBox"><summary>Diagnostics</summary><div id="diagLines">not joined yet</div></details>
     <div id="dragEdge" title="Resize"></div>
   </aside>
@@ -750,21 +750,38 @@ window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new
     if(this.local) return this.local;
     if(!this._askPromise){
       this._askPromise=(async()=>{
-        if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ toast('Camera/mic need HTTPS or localhost — data-only mode'); this._askPromise=null; return null; }
+        if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ toast('Mic needs HTTPS or localhost — data-only mode'); this._askPromise=null; return null; }
         let stream=null;
-        try{ stream=await navigator.mediaDevices.getUserMedia({video:true,audio:true}); }
+        try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
         catch(e){
-          try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); toast('No camera found — voice-only mode'); }
-          catch(e2){
-            const n=e2&&e2.name;
-            toast((n==='NotAllowedError'||n==='SecurityError')?'Mic/camera blocked — allow permission for voice chat':'No mic/camera found — data-only mode');
-            this._askPromise=null; return null;
-          }
+          const n=e&&e.name;
+          toast((n==='NotAllowedError'||n==='SecurityError')?'Mic blocked — allow permission for voice chat':'No mic found — data-only mode');
+          this._askPromise=null; return null;
         }
         this.local=stream; this.refreshLocalCard(); this.syncOutgoing(); return stream;
       })();
     }
     return this._askPromise;
+  },
+  async ensureCam(){
+    // Camera is manual-only: attach a video track on demand (mic autostarts, camera never does).
+    const s=await this.ensureLocal();
+    if(!s) return null;
+    let vt=s.getVideoTracks().find(t=>t.readyState!=='ended');
+    if(!vt){
+      try{
+        if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ toast('Camera needs HTTPS or localhost'); return s; }
+        const vs=await navigator.mediaDevices.getUserMedia({video:true});
+        vt=vs.getVideoTracks()[0];
+        if(!vt) return s;
+        s.addTrack(vt); this.syncOutgoing();
+        // Existing calls were placed audio-only (no video sender): re-dial so video flows.
+        const redial=[];
+        Object.values(this.calls).forEach(c=>{ try{ const hasV=c.peerConnection&&c.peerConnection.getSenders().some(x=>x.track&&x.track.kind==='video'); if(!hasV) redial.push(c.peer); }catch(e){ try{ redial.push(c.peer); }catch(_){} } });
+        redial.forEach(pid=>{ try{ const old=this.calls[pid]; delete this.calls[pid]; try{ old&&old.close(); }catch(e){} }catch(e){} try{ this.callPeer(pid); }catch(e){} });
+      }catch(e){ toast('No camera found'); return s; }
+    }
+    return s;
   },
   syncOutgoing(){
     // One managed stream for all outgoing calls: screen video wins, else camera; always plus mic.
@@ -851,7 +868,7 @@ window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new
   onSignal(){}
 };
 window.addEventListener('smc-peers',()=>{ try{ if(window.Media&&(window.Media.outgoing||window.Media.local)) window.Media.dialAll(); }catch(e){} });
-$('#btnCam').addEventListener('click',async e=>{ const s=await window.Media.ensureLocal(); const t=s&&s.getVideoTracks()[0]; if(!t){ toast('No camera to toggle'); return; } t.enabled=!t.enabled; e.currentTarget.classList.toggle('off',!t.enabled); e.currentTarget.textContent=t.enabled?'📷':'🚫'; try{ window.Media.refreshLocalCard(); }catch(err){} });
+$('#btnCam').addEventListener('click',async e=>{ const pre=window.Media.local&&window.Media.local.getVideoTracks().find(t=>t.readyState!=='ended'); const s=await window.Media.ensureCam(); const t=s&&s.getVideoTracks().find(x=>x.readyState!=='ended'); if(!t){ return; } if(!pre){ e.currentTarget.classList.remove('off'); e.currentTarget.textContent='📷'; } else { t.enabled=!t.enabled; e.currentTarget.classList.toggle('off',!t.enabled); e.currentTarget.textContent=t.enabled?'📷':'🚫'; } try{ window.Media.refreshLocalCard(); }catch(err){} });
 $('#btnMic').addEventListener('click',async e=>{ const s=await window.Media.ensureLocal(); const t=s&&s.getAudioTracks()[0]; if(!t) return; t.enabled=!t.enabled; e.currentTarget.classList.toggle('off',!t.enabled); e.currentTarget.textContent=t.enabled?'🎙️':'🔇'; });
 $('#btnScreen').addEventListener('click',async e=>{
   const b=e.currentTarget, M=window.Media;
@@ -868,7 +885,7 @@ $('#btnScreen').addEventListener('click',async e=>{
   }catch(err){ toast('Screen share cancelled'); }
 });
 window.addEventListener('smc-open',()=>{ renderPeers(); try{ if(window.Media&&window.Media.local){ window.Media.local.getAudioTracks().forEach(t=>{ try{ t.enabled=true; }catch(e){} }); const mb=$('#btnMic'); if(mb){ mb.classList.remove('off'); mb.textContent='🎙️'; } } }catch(e){} });
-addMsg({sys:true,text:'🚀 Super Mesh Chat v2.8 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
+addMsg({sys:true,text:'🚀 Super Mesh Chat v2.9 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
 renderPeers();
 /* startup: ask for camera + mic permission right away */
 try{ if(window.Media&&window.Media.ensureLocal) window.Media.ensureLocal(); }catch(e){}
