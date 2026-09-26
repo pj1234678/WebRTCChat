@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Super Mesh Chat — P2P Video + Files</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -29,7 +30,7 @@
   --bg-main:#111214; --bg-side:#1e1f22; --bg-card:#2b2d31; --bg-input:#2b2d31;
   --bg-hover:#35373c; --primary:#1a73e8; --primary-hover:#1765cc;
   --text:#dbdee1; --muted:#949ba4; --green:#23a55a; --yellow:#f0b232; --red:#f23f43;
-  --radius:12px; --side-w:280px;
+  --radius:12px; --side-w:340px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -96,7 +97,11 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
 .top-btn{background:var(--bg-card);border:0;color:var(--text);border-radius:8px;padding:7px 10px;cursor:pointer;font-size:14px}
 .top-btn:hover{background:var(--bg-hover)}
 .top-btn.active{background:var(--primary);color:#fff}
-#videoGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;padding:12px 16px;max-height:38vh;overflow-y:auto;background:var(--bg-main)}
+#videoGrid{display:none}
+.msg video.chat-vid{width:170px;max-width:100%;border-radius:8px;margin-top:6px;display:block;background:#000;cursor:zoom-in}
+#vidOverlay{position:fixed;inset:0;background:rgba(0,0,0,.92);display:none;align-items:center;justify-content:center;z-index:99990;cursor:zoom-out;flex-direction:column;gap:8px}
+#vidOverlay video{max-width:94vw;max-height:88vh;border-radius:10px;box-shadow:0 10px 60px #000;background:#000}
+#vidOverlay span{font-size:12px;color:var(--muted);font-weight:700}
 .video-card{position:relative;aspect-ratio:1/1;background:#000;border-radius:14px;overflow:hidden;border:2px solid #232428;transition:transform .18s ease,border-color .18s;cursor:pointer}
 .video-card:hover{transform:scale(1.025);border-color:#3a3d44}
 .video-card.speaking{border-color:var(--green);box-shadow:0 0 0 2px var(--green),0 0 18px rgba(35,165,90,.5)}
@@ -168,7 +173,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     </form>
     <div class="side-h"><span>Peers — <span id="peerCountSide">0</span></span><span>mesh</span></div>
     <div id="peerList"></div>
-    <div class="self-note">v2.5 • Drag right edge to resize • &lt;900px becomes drawer</div>
+    <div class="self-note">v2.6 • Drag right edge to resize • &lt;900px becomes drawer</div>
     <details id="diagBox"><summary>Diagnostics</summary><div id="diagLines">not joined yet</div></details>
     <div id="dragEdge" title="Resize"></div>
   </aside>
@@ -202,6 +207,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
 <input type="file" id="fileInput" hidden multiple>
 <div id="toast"></div>
 <div id="imgOverlay"><img alt="fullscreen preview"></div>
+<div id="vidOverlay"><video controls playsinline></video><span>click anywhere to close</span></div>
 
 <script>
 'use strict';
@@ -248,7 +254,7 @@ function teardownMesh(){
   try{ peers.forEach(rec=>{ try{ rec.conn&&rec.conn.close(); }catch(e){} }); }catch(e){}
   peers.clear(); pendingRetry.forEach(to=>{ try{clearTimeout(to);}catch(e){} }); pendingRetry.clear(); stopHeartbeat();
   try{ if(window.Media&&window.Media.calls){ Object.keys(window.Media.calls).forEach(k=>{ try{ window.Media.removeVideo(k); }catch(e){} }); } }catch(e){}
-  try{ Array.from(document.querySelectorAll('#videoGrid .video-card')).forEach(c=>{ if(c.id!=='vc-local') c.remove(); }); }catch(e){}
+  try{ Array.from(document.querySelectorAll('[id^="chat-vid-"]')).forEach(m=>{ if(m.id!=='chat-vid-local') m.remove(); }); }catch(e){}
   const old=peer; peer=null; myId=null; epoch++; // invalidate callbacks from the old peer
   try{ old&&old.destroy(); }catch(e){}
   for(const k in lastConnErr){ try{delete lastConnErr[k];}catch(e){} }
@@ -525,7 +531,7 @@ const typingPeers=new Map();
 
 function addMsg({name,text,me=false,sys=false,img=null,fileUrl=null,fileName=null,time=null}){
   const d=document.createElement('div'); d.className='msg'+(me?' me':'')+(sys?' sys':'');
-  const ts=time||new Date().toLocaleTimeString();
+  const ts=time||new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
   if(sys){ d.textContent=text; }
   else{
     const meta=document.createElement('div'); meta.className='meta'; meta.textContent=name+' • '+ts; d.appendChild(meta);
@@ -570,15 +576,18 @@ function renderPeers(){
     const nm=document.createElement('span'); nm.className='peer-name'; nm.textContent=name; top.appendChild(nm);
     const pg=document.createElement('span'); pg.className='ping'; pg.textContent=(ping>=0?ping+'ms':'—'); top.appendChild(pg);
     c.appendChild(top);
-    const ctrl=document.createElement('div'); ctrl.className='peer-ctrl';
-    const lab=document.createElement('span'); lab.textContent='VOL'; ctrl.appendChild(lab);
-    const r=document.createElement('input'); r.type='range'; r.min='0'; r.max='100'; r.value=Math.round((vol??1)*100);
-    r.addEventListener('input',()=>{ if(onVol) onVol(r.value/100); });
-    ctrl.appendChild(r); c.appendChild(ctrl); return c;
+    if(onVol){
+      const ctrl=document.createElement('div'); ctrl.className='peer-ctrl';
+      const lab=document.createElement('span'); lab.textContent='VOL'; ctrl.appendChild(lab);
+      const r=document.createElement('input'); r.type='range'; r.min='0'; r.max='100'; r.value=Math.round((vol??1)*100);
+      r.addEventListener('input',()=>{ try{ onVol(r.value/100); }catch(e){} });
+      ctrl.appendChild(r); c.appendChild(ctrl);
+    }
+    return c;
   };
-  peerList.appendChild(mk((window.Search?window.Search.myName:'you')+' (you)',0,'green',1,v=>{ const vid=$('#video-local'); if(vid) vid.volume=v; },true));
+  peerList.appendChild(mk((window.Search?window.Search.myName:'you')+' (you)',0,'green',1,null,true));
   peers.forEach(p=>{
-    peerList.appendChild(mk(p.name||p.id.slice(0,6), p.latency??-1, p.status||'green', p.volume??1, v=>{ p.volume=v; const card=document.getElementById('vc-'+CSS.escape(p.id)); const vd=card?card.querySelector('video'):null; if(vd) vd.volume=v; }));
+    peerList.appendChild(mk(p.name||p.id.slice(0,6), p.latency??-1, p.status||'green', p.volume??1, v=>{ p.volume=v; if(p.videoEl){ try{ p.videoEl.volume=v; }catch(e){} } }));
   });
   try{
     const dl=$('#diagLines');
@@ -632,7 +641,7 @@ window.FileUI={
   postFileMessage(pub){
     const UI=window.FileUI;
     if(!pub||UI.postedChat[pub.id]) return; UI.postedChat[pub.id]=1;
-    const ts=new Date().toLocaleTimeString();
+    const ts=new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'});
     const d=document.createElement('div');
     if(pub.role==='send'){
       d.className='msg me';
@@ -694,7 +703,7 @@ window.addEventListener('smc-error',e=>{ try{ const d=e.detail||{}; const txt=(d
 })();
 
 /* clock (room + mobile) */
-setInterval(()=>{ const d=new Date(); const s=pad2(d.getHours())+':'+pad2(d.getMinutes())+':'+pad2(d.getSeconds()); const rc=$('#roomClock'); if(rc) rc.textContent=s; const cm=$('#clockMobile'); if(cm) cm.textContent=s.slice(0,5); },1000);
+setInterval(()=>{ const d=new Date(); const h12=d.getHours()%12||12; const ap=d.getHours()<12?'AM':'PM'; const s=h12+':'+pad2(d.getMinutes())+':'+pad2(d.getSeconds())+' '+ap; const rc=$('#roomClock'); if(rc) rc.textContent=s; const cm=$('#clockMobile'); if(cm) cm.textContent=h12+':'+pad2(d.getMinutes())+' '+ap; },1000);
 
 /* wake lock: always on (no button) */
 let wl=null;
@@ -707,8 +716,10 @@ $('#btnFull').addEventListener('click',async()=>{ try{ if(!document.fullscreenEl
 const imgOv=$('#imgOverlay'), imgEl=imgOv.querySelector('img');
 document.addEventListener('click',e=>{ const t=e.target.closest?e.target.closest('.msg img'):null; if(!t) return; imgEl.src=t.currentSrc||t.src; imgOv.style.display='flex'; });
 imgOv.addEventListener('click',()=>imgOv.style.display='none');
-document.addEventListener('dblclick',e=>{ const v=e.target.closest?e.target.closest('video'):null; if(!v) return; const card=v.closest('.video-card')||v; try{ if(card.requestFullscreen) card.requestFullscreen(); }catch(_){} });
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') imgOv.style.display='none'; });
+const vidOv=$('#vidOverlay'), vidEl=vidOv.querySelector('video');
+window.openVidOverlay=function(stream,label,muted){ try{ vidEl.srcObject=stream; vidEl.muted=!!muted; vidOv.style.display='flex'; const pr=vidEl.play(); if(pr&&pr.catch) pr.catch(()=>{}); }catch(e){} };
+vidOv.addEventListener('click',()=>{ try{ vidEl.pause(); vidEl.removeAttribute('src'); vidEl.srcObject=null; }catch(e){} vidOv.style.display='none'; });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ imgOv.style.display='none'; try{ vidEl.pause(); vidEl.srcObject=null; }catch(err){} vidOv.style.display='none'; } });
 
 /* uploads */
 $('#btnFile').addEventListener('click',()=>$('#fileInput').click());
@@ -722,7 +733,7 @@ window.addEventListener('dragleave',e=>{ e.preventDefault(); if(--dragN<=0){ dra
 window.addEventListener('drop',e=>{ e.preventDefault(); dragN=0; ov.classList.remove('show'); if(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files.length) sendFiles(e.dataTransfer.files); });
 
 /* ---------------- Media: cam / mic / screen + PeerJS calls ---------------- */
-window.Media={ calls:{}, local:null, screen:null,
+window.Media={ calls:{}, local:null, screen:null, outgoing:null, pendingPlay:new Set(), _unblockWired:false, _hinted:false,
   async ensureLocal(){
     if(this.local) return this.local;
     if(!this._askPromise){
@@ -738,11 +749,25 @@ window.Media={ calls:{}, local:null, screen:null,
             this._askPromise=null; return null;
           }
         }
-        this.local=stream; this.refreshLocalCard(); return stream;
+        this.local=stream; this.refreshLocalCard(); this.syncOutgoing(); return stream;
       })();
     }
     return this._askPromise;
   },
+  syncOutgoing(){
+    // One managed stream for all outgoing calls: screen video wins, else camera; always plus mic.
+    try{
+      if(!this.outgoing){ try{ this.outgoing=new MediaStream(); }catch(e){ return; } }
+      const out=this.outgoing;
+      out.getVideoTracks().forEach(t=>{ try{ out.removeTrack(t); }catch(e){} });
+      const scr=this.screen&&this.screen.getVideoTracks().find(t=>t.readyState==='live');
+      const cam=this.local&&this.local.getVideoTracks().find(t=>t.readyState==='live');
+      if(scr||cam){ try{ out.addTrack(scr||cam); }catch(e){} }
+      const haveA=new Set(out.getAudioTracks());
+      if(this.local) this.local.getAudioTracks().forEach(t=>{ if(!haveA.has(t)){ try{ out.addTrack(t); }catch(e){} } });
+    }catch(e){}
+  },
+  dialAll(){ try{ const recs=window.Search?[...window.Search.peers.values()]:[]; recs.forEach(r=>{ if(!r.pending&&r.conn&&r.conn.open) this.callPeer(r.id); }); }catch(e){} },
   refreshLocalCard(){
     // Only show the broadcast square while desktop or webcam video is actually streaming
     let stream=null;
@@ -751,61 +776,87 @@ window.Media={ calls:{}, local:null, screen:null,
       const cam=this.local&&this.local.getVideoTracks().some(t=>t.readyState==='live'&&t.enabled);
       if(scr) stream=this.screen; else if(cam) stream=this.local;
     }catch(e){}
-    const existing=document.getElementById('vc-local');
+    const existing=document.getElementById('chat-vid-local');
     if(stream){ this.addVideo('local',stream,true,(window.Search?window.Search.myName:'you')+' (you)'); }
     else if(existing){ existing.remove(); }
   },
   addVideo(id,stream,muted,label){
-    let card=document.getElementById('vc-'+id);
-    if(!card){ card=document.createElement('div'); card.className='video-card'; card.id='vc-'+id;
-      card.innerHTML='<video autoplay playsinline></video><span class="name-overlay"></span><span class="mic-badge">🎙️</span>';
-      $('#videoGrid').appendChild(card);
-      card.addEventListener('click',()=>{ card.classList.toggle('speaking'); });
+    // Streams live as chat messages: one small preview box per peer, click to fullscreen. No grid.
+    const hasVid=stream&&stream.getVideoTracks&&stream.getVideoTracks().some(t=>t.readyState==='live');
+    if(!hasVid){
+      // Mic-only: no visual anywhere. Voice keeps playing through a hidden element.
+      if(!muted&&stream){
+        let au=document.getElementById('au-'+id);
+        if(!au){ au=document.createElement('audio'); au.id='au-'+id; au.style.display='none'; au.autoplay=true; document.body.appendChild(au); }
+        if(au.srcObject!==stream){ try{ au.srcObject=stream; }catch(e){} }
+        try{ const rec=window.Search.peers.get(id); if(rec){ rec.videoEl=au; if(rec.volume!=null) au.volume=rec.volume; } }catch(e){}
+        try{ const pr=au.play(); if(pr&&pr.catch) pr.catch(()=>{ try{ const M=window.Media; M.pendingPlay.add(au); }catch(e){} }); }catch(e){}
+      }
+      return null;
     }
-    const v=card.querySelector('video'); v.srcObject=stream; v.muted=!!muted; if(!muted&&stream){ const rec=window.Search.peers.get(id); v.volume=(rec&&rec.volume!=null)?rec.volume:1; }
+    let box=document.getElementById('chat-vid-'+id);
+    if(!box){
+      box=document.createElement('div'); box.className='msg'+(id==='local'?' me':''); box.id='chat-vid-'+id;
+      const meta=document.createElement('div'); meta.className='meta';
+      meta.textContent=(label||id)+' • '+new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+      box.appendChild(meta);
+      const vd=document.createElement('video'); vd.className='chat-vid'; vd.playsInline=true; vd.muted=!!muted;
+      vd.addEventListener('click',()=>{ try{ window.openVidOverlay(vd.srcObject,(label||id),vd.muted); }catch(e){} });
+      box.appendChild(vd);
+      chatStream.appendChild(box); chatStream.scrollTop=chatStream.scrollHeight;
+      while(chatStream.children.length>300) chatStream.firstChild.remove();
+    }
+    const v=box.querySelector('video'); if(v.srcObject!==stream){ try{ v.srcObject=stream; }catch(e){} }
+    v.muted=!!muted;
+    if(id!=='local'){ try{ const rec=window.Search.peers.get(id); if(rec){ rec.videoEl=v; if(rec.volume!=null) v.volume=rec.volume; } }catch(e){} }
     try{
-      const hasVid=stream&&stream.getVideoTracks&&stream.getVideoTracks().some(t=>t.readyState==='live');
-      let av=card.querySelector('.avatar-fallback');
-      if(!hasVid){ if(!av){ av=document.createElement('div'); av.className='avatar-fallback'; card.prepend(av); } av.textContent=(label||id||'?').slice(0,1).toUpperCase(); }
-      else if(av){ av.remove(); }
+      const pr=v.play();
+      if(pr&&pr.catch) pr.catch(()=>{ try{
+        const M=window.Media; M.pendingPlay.add(v);
+        if(!M._unblockWired){ M._unblockWired=true; const go=()=>{ try{ M.pendingPlay.forEach(el=>{ try{ const q=el.play(); if(q&&q.catch) q.catch(()=>{}); }catch(e){} }); M.pendingPlay.clear(); }catch(e){} }; document.addEventListener('click',go); document.addEventListener('keydown',go); }
+        if(!M._hinted){ M._hinted=true; toast('Tap anywhere to enable voice'); }
+      }catch(e){} });
     }catch(e){}
-    card.querySelector('.name-overlay').textContent=label||id; return card;
+    return box;
   },
-  removeVideo(id){ const c=document.getElementById('vc-'+id); if(c) c.remove(); if(this.calls[id]){ try{this.calls[id].close();}catch(_){} delete this.calls[id]; } },
+  removeVideo(id){ const b=document.getElementById('chat-vid-'+id); if(b) b.remove(); try{ const au=document.getElementById('au-'+id); if(au) au.remove(); }catch(e){} if(this.calls[id]){ try{this.calls[id].close();}catch(_){} delete this.calls[id]; } },
   callPeer(pid){
-    const peer=window.Search?window.Search.peer:null; if(!peer||typeof peer.call!=='function'||!this.local) return;
+    const peer=window.Search?window.Search.peer:null; if(!peer||typeof peer.call!=='function') return;
+    const out=this.outgoing||this.local; if(!out) return;
     if(this.calls[pid]||pid===window.Search.myId) return;
-    try{ const call=peer.call(pid,this.local); this.calls[pid]=call;
+    try{ const call=peer.call(pid,out); this.calls[pid]=call;
       call.on('stream',s=>{ this.addVideo(pid,s,false,(window.Search.peers.get(pid)||{}).name||pid.slice(0,6)); playJoin(); });
       call.on('close',()=>this.removeVideo(pid)); call.on('error',()=>this.removeVideo(pid));
     }catch(e){}
   },
   onIncomingCall(call){
     const self=this;
-    (async()=>{ await self.ensureLocal(); try{ call.answer(self.local); }catch(e){ return; }
+    (async()=>{ await self.ensureLocal(); self.syncOutgoing(); const out=self.outgoing||self.local; if(!out) return; try{ call.answer(out); }catch(e){ return; }
       call.on('stream',s=>{ self.addVideo(call.peer,s,false,(window.Search.peers.get(call.peer)||{}).name||call.peer.slice(0,6)); playJoin(); });
       call.on('close',()=>self.removeVideo(call.peer));
     })();
   },
   onSignal(){}
 };
-window.addEventListener('smc-peers',()=>{ if(!window.Media.local) return; const recs=window.Search?[...window.Search.peers.values()]:[]; recs.forEach(r=>{ if(!r.pending&&r.conn&&r.conn.open) window.Media.callPeer(r.id); }); });
+window.addEventListener('smc-peers',()=>{ try{ if(window.Media&&(window.Media.outgoing||window.Media.local)) window.Media.dialAll(); }catch(e){} });
 $('#btnCam').addEventListener('click',async e=>{ const s=await window.Media.ensureLocal(); const t=s&&s.getVideoTracks()[0]; if(!t){ toast('No camera to toggle'); return; } t.enabled=!t.enabled; e.currentTarget.classList.toggle('off',!t.enabled); e.currentTarget.textContent=t.enabled?'📷':'🚫'; try{ window.Media.refreshLocalCard(); }catch(err){} });
 $('#btnMic').addEventListener('click',async e=>{ const s=await window.Media.ensureLocal(); const t=s&&s.getAudioTracks()[0]; if(!t) return; t.enabled=!t.enabled; e.currentTarget.classList.toggle('off',!t.enabled); e.currentTarget.textContent=t.enabled?'🎙️':'🔇'; });
 $('#btnScreen').addEventListener('click',async e=>{
   const b=e.currentTarget, M=window.Media;
   try{
-    if(M.screen){ M.screen.getTracks().forEach(t=>t.stop()); M.screen=null; const cam=M.local&&M.local.getVideoTracks()[0];
+    if(M.screen){ M.screen.getTracks().forEach(t=>t.stop()); M.screen=null; M.syncOutgoing(); const cam=M.local&&M.local.getVideoTracks()[0];
       Object.values(M.calls).forEach(c=>{ try{ const snd=c.peerConnection&&c.peerConnection.getSenders().find(s=>s.track&&s.track.kind==='video'); if(snd&&cam) snd.replaceTrack(cam); }catch(_){} });
       b.classList.remove('live'); b.textContent='🖥️'; try{window.Search.broadcast({t:'signal',kind:'screen-stop'});}catch(_){} try{M.refreshLocalCard();}catch(_){} return; }
-    const ds=await navigator.mediaDevices.getDisplayMedia({video:true}); M.screen=ds; const st=ds.getVideoTracks()[0];
-    Object.values(M.calls).forEach(c=>{ try{ const snd=c.peerConnection&&c.peerConnection.getSenders().find(s=>s.track&&s.track.kind==='video'); if(snd) snd.replaceTrack(st); }catch(_){} });
+    const ds=await navigator.mediaDevices.getDisplayMedia({video:true}); M.screen=ds; M.syncOutgoing(); const st=ds.getVideoTracks()[0];
+    const redial=[];
+    Object.values(M.calls).forEach(c=>{ try{ const snd=c.peerConnection&&c.peerConnection.getSenders().find(s=>s.track&&s.track.kind==='video'); if(snd&&st) snd.replaceTrack(st); else redial.push(c.peer); }catch(_){ try{redial.push(c.peer);}catch(e){} } });
+    redial.forEach(pid=>{ try{ const old=M.calls[pid]; delete M.calls[pid]; try{ old&&old.close(); }catch(e){} }catch(e){} try{ M.callPeer(pid); }catch(e){} });
     try{window.Search.broadcast({t:'signal',kind:'screen-start'});}catch(_){}
     st.onended=()=>b.click(); b.classList.add('live'); b.textContent='⏹️'; try{M.refreshLocalCard();}catch(_){}
   }catch(err){ toast('Screen share cancelled'); }
 });
 window.addEventListener('smc-open',()=>{ renderPeers(); try{ if(window.Media&&window.Media.local){ window.Media.local.getAudioTracks().forEach(t=>{ try{ t.enabled=true; }catch(e){} }); const mb=$('#btnMic'); if(mb){ mb.classList.remove('off'); mb.textContent='🎙️'; } } }catch(e){} });
-addMsg({sys:true,text:'🚀 Super Mesh Chat v2.5 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
+addMsg({sys:true,text:'🚀 Super Mesh Chat v2.6 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
 renderPeers();
 /* startup: ask for camera + mic permission right away */
 try{ if(window.Media&&window.Media.ensureLocal) window.Media.ensureLocal(); }catch(e){}
