@@ -440,7 +440,7 @@ function netSend(t,m){ if(!t||t==='broadcast') return netBroadcast(m); return ne
 function uiUpdate(tr){ try{ const pub=publicView(tr); if(window.FileUI&&window.FileUI.updateTransferUI) window.FileUI.updateTransferUI(pub); }catch(_){} }
 function uiRender(){}
 function publicView(tr){ if(!tr) return null; const done=tr.role==='send'?tr.acked.size:tr.receivedCount;
-  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.ackedBytes||tr.receivedBytes||0,cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
+  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.role==='send'?(tr.ackedBytes||0):(tr.receivedBytes||0),cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
 const CRC_T=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; } return t; })();
 function crc32(data){ let c=0xFFFFFFFF; for(let i=0;i<data.length;i++) c=CRC_T[(c^data[i])&0xFF]^(c>>>8); return ((c^0xFFFFFFFF)>>>0).toString(16).padStart(8,'0'); }
 async function sha256Whole(file){ const PART=2*1024*1024, size=file.size; if(!crypto.subtle) throw new Error('no-subtle');
@@ -500,7 +500,8 @@ async function onChunkRecv(tr,msg,peerId){ if(tr.done||tr.cancelled||tr.complete
   try{ if(tr.useOPFS&&tr.writable){ const cp=new Uint8Array(u8.length); cp.set(u8); tr.writeLock=tr.writeLock.then(()=>tr.writable.write({type:'write',position:idx*CHUNK,data:cp})).catch(()=>{throw new Error('opfs-write');}); await tr.writeLock; }
     else { const cp=new Uint8Array(u8.length); cp.set(u8); tr.chunks.set(idx,cp); } }
   catch(_){ try{ tr.useOPFS=false; if(tr.writable){ try{await tr.writable.abort();}catch(_){} tr.writable=null; } const cp=new Uint8Array(u8.length); cp.set(u8); tr.chunks.set(idx,cp); }catch(_){ return; } }
-  tr.receivedSet.add(idx); tr.receivedCount=tr.receivedSet.size; tr.receivedBytes+=u8.length; tr.ackedBytes=tr.receivedBytes; tr.lastActivity=nowT(); trackSpeed(tr,u8.length);
+  if(tr.receivedSet.has(idx)){ netSendTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); return; }
+  tr.receivedSet.add(idx); tr.receivedCount=tr.receivedSet.size; tr.receivedBytes+=u8.length; tr.lastActivity=nowT(); trackSpeed(tr,u8.length);
   netSendTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); uiUpdate(tr);
   if(tr.receivedCount>=tr.total) await assembleRecv(tr.id); }
 function requestMissingIfStalled(id){ const tr=transfers.get(id); if(!tr||tr.role!=='recv'||tr.done||tr.cancelled||tr.complete||tr.paused) return; if(nowT()-tr.lastActivity<3000) return; if(tr.receivedCount>=tr.total) return;
@@ -572,7 +573,6 @@ window.SMC_hooks.onTyping=(from,msg)=>{ const n=msg.name||from.slice(0,6); typin
 function renderTyping(){ const names=[...typingPeers.entries()].filter(([k])=>!k.endsWith('_t')).map(([,v])=>v); typingInd.textContent=names.length? names.join(', ')+' is typing…':''; }
 window.SMC_hooks.onPresence=(from,msg)=>{ if(msg&&msg.left){ addMsg({sys:true,text:'👋 peer left'}); playLeave(); } else { playJoin(); } };
 window.SMC_hooks.onFile=(from,msg)=>{ try{ window.FileV2.handleFileMsg(msg,from); }catch(e){} };
-window.addEventListener('smc-file',(e)=>{ try{ window.FileV2.handleFileMsg(e.detail.msg,e.detail.from); }catch(_){} });
 window.addEventListener('smc-peers',()=>renderPeers());
 window.onPeersChanged=renderPeers;
 
