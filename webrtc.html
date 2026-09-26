@@ -218,6 +218,7 @@ window.SMC_hooks = window.SMC_hooks || {};
 (function MeshStack(){
 if(typeof Peer==='undefined'){ showErr('⚠ PeerJS CDN failed to load — check network. Retrying fallback…'); window.addEventListener('smc-peerjs-ready', ()=>location.reload()); setTimeout(()=>{ if(typeof Peer==='undefined') showErr('⚠ PeerJS still unavailable. App cross-signaling disabled; files/chat need PeerJS.'); },6000); return; }
 const CHANNEL='mesh-v1';
+const CHANNEL_FILE=CHANNEL+'-file'; // bulk lane: file chunks/acks only, keeps pings+chat uncongested
 const ROOM_PREFIX='superconf-mesh-';
 function roomIdFromPass(p){ p=String(p||'').trim(); if(!p) return ROOM_PREFIX+'secretpassword'; if(p.indexOf(ROOM_PREFIX)===0) return p.slice(0,64); const clean=p.replace(/[^\w\-]/g,'').slice(0,40)||'secretpassword'; return (ROOM_PREFIX+clean).slice(0,64); }
 let ROOM_ID=roomIdFromPass((function(){ try{ return localStorage.getItem('smc_room_pass')||'secretpassword'; }catch(e){ return 'secretpassword'; } })());
@@ -226,14 +227,15 @@ const HB_INTERVAL=5000, WARN_AFTER=20000, DEAD_AFTER=40000, PENDING_AFTER=15000,
 let peer=null,myId=null,isHost=false,hbTimer=null,meshSyncTimer=null,reconcileTimer=null,hostTimer=null,epoch=0,initAttempt=0,initRetryTo=null,lastMeshUp=0,lastReclaim=0;
 const peers=new Map();
 const pendingRetry=new Map();
+const bulkRetry=new Map(); // pid#file -> bulk-dial timer
 const lastConnErr={}; // pid -> last data-connection error (survives deletion, shown in diag)
 const errSeen=new Map(); // room+type -> last notify ms (60s expiry, so repeat outages re-notify)
 function linkEvent(pid,phase,name){ try{ window.dispatchEvent(new CustomEvent('smc-link',{detail:{pid,phase,name}})); }catch(e){} }
 function hideErr(){ try{ const b=$('#errBanner'); if(b) b.style.display='none'; }catch(e){} }
 function noteError(msg){ emit('smc-error',myId,{message:msg}); try{ toast(msg); }catch(e){} }
 function teardownMesh(){
-  try{ peers.forEach(rec=>{ try{ rec.conn&&rec.conn.close(); }catch(e){} }); }catch(e){}
-  peers.clear(); pendingRetry.forEach(to=>{ try{clearTimeout(to);}catch(e){} }); pendingRetry.clear(); stopHeartbeat();
+  try{ peers.forEach(rec=>{ try{ rec.conn&&rec.conn.close(); }catch(e){} try{ rec.bulk&&rec.bulk.close(); }catch(e){} }); }catch(e){}
+  peers.clear(); pendingRetry.forEach(to=>{ try{clearTimeout(to);}catch(e){} }); pendingRetry.clear(); bulkRetry.forEach(to=>{ try{clearTimeout(to);}catch(e){} }); bulkRetry.clear(); stopHeartbeat();
   try{ if(window.Media&&window.Media.calls){ Object.keys(window.Media.calls).forEach(k=>{ try{ window.Media.removeVideo(k); }catch(e){} }); } }catch(e){}
   try{ Array.from(document.querySelectorAll('[id^="chat-vid-"]')).forEach(m=>{ if(m.id!=='chat-vid-local') m.remove(); }); }catch(e){}
   const old=peer; peer=null; myId=null; epoch++; // invalidate callbacks from the old peer
@@ -254,7 +256,7 @@ function saveName(n){ myName=String(n||myName).slice(0,24)||myName; localStorage
 function setName(n){ saveName(n); broadcast({t:'presence',id:myId,name:myName}); onPeersChanged(); }
 function onPeersChanged(){ try{ if(typeof window.onPeersChanged==='function') window.onPeersChanged([...peers.values()]); }catch(e){} window.dispatchEvent(new CustomEvent('smc-peers',{detail:[...peers.values()]})); }
 function emit(type,from,msg){ window.dispatchEvent(new CustomEvent(type,{detail:{from,msg}})); const h=window.SMC_hooks||{}; const map={'smc-chat':'onChat','smc-typing':'onTyping','smc-presence':'onPresence','smc-file':'onFile','smc-sync':'onMeshSync'}; try{ if(map[type]&&typeof h[map[type]]==='function') h[map[type]](from,msg); }catch(e){} }
-function init(){ stopHeartbeat(); pendingRetry.forEach(to=>clearTimeout(to)); pendingRetry.clear(); updateRoomUI(); wireRoomBox(); setIdle(); }
+function init(){ stopHeartbeat(); pendingRetry.forEach(to=>clearTimeout(to)); pendingRetry.clear(); bulkRetry.forEach(to=>clearTimeout(to)); bulkRetry.clear(); updateRoomUI(); wireRoomBox(); setIdle(); }
 function setIdle(){ try{ const jl=$('#connLabel'); if(jl) jl.textContent='enter password & press Join'; const d=$('#connStatus'); if(d) d.className='warn'; }catch(e){} }
 function updateRoomUI(){ try{ const joined=!!myId; const rt=$('#roomTitle'); if(rt) rt.textContent=joined?(currentPass()||'lobby'):'lobby'; const rp=$('#roomPass'); if(rp&&document.activeElement!==rp){ let saved=null; try{ saved=localStorage.getItem('smc_room_pass'); }catch(e){} if(saved) rp.value=saved; } }catch(e){} }
 function joinRoom(newPass){
@@ -294,7 +296,7 @@ function attachPeer(p,hostMode){
     initAttempt=0; if(initRetryTo){ try{clearTimeout(initRetryTo);}catch(e){} initRetryTo=null; }
     startHeartbeat(); if(!hostMode) connectToPeer(ROOM_ID,0); setTimeout(()=>broadcast({t:'hello',id:myId,name:myName}),300);
     updateConn(true); emit('smc-open',myId,{isHost}); });
-  peer.on('connection', c=>{ if(!alive()){ try{c.close();}catch(e){} return; } if(c.label&&c.label!==CHANNEL) return; setupConn(c); });
+  peer.on('connection', c=>{ if(!alive()){ try{c.close();}catch(e){} return; } if(c.label===CHANNEL_FILE){ setupBulk(c); return; } if(c.label&&c.label!==CHANNEL) return; setupConn(c); });
   peer.on('call', call=>{ if(!alive()) return; try{ if(window.Media && window.Media.onIncomingCall) window.Media.onIncomingCall(call); }catch(e){} });
   peer.on('disconnected', ()=>{ if(!alive()) return; try{ peer.reconnect(); }catch(e){} updateConn(false); });
   peer.on('close', ()=>{ if(!alive()) return; stopHeartbeat(); updateConn(false); scheduleInitRetry('peer-close'); });
@@ -336,11 +338,53 @@ function connectToPeer(pid,attempt=0){
   },delay);
   pendingRetry.set(pid,to);
 }
+function connectBulk(pid,attempt=0){
+  if(!pid||pid===myId||!peer||peer.destroyed) return;
+  const rec0=peers.get(pid); if(rec0&&rec0.bulk&&rec0.bulk.open) return;
+  const key=pid+'#file';
+  if(bulkRetry.has(key)) return;
+  if(attempt>5){ bulkRetry.delete(key); return; }
+  const delay=attempt===0?1500:Math.min(1000*Math.pow(2,Math.min(attempt,4)),15000);
+  const to=setTimeout(()=>{
+    bulkRetry.delete(key);
+    if(!peer||peer.destroyed||pid===myId) return;
+    const r2=peers.get(pid); if(!r2||!r2.conn||!r2.conn.open) return; // control first
+    if(r2.bulk&&r2.bulk.open) return;
+    let conn;
+    try{ conn=peer.connect(pid,{label:CHANNEL_FILE,reliable:true}); }
+    catch(e){ connectBulk(pid,attempt+1); return; }
+    if(!conn){ connectBulk(pid,attempt+1); return; }
+    setupBulk(conn);
+    const openTo=setTimeout(()=>{
+      const r3=peers.get(pid);
+      if(r3&&r3.bulk&&r3.bulk.open){ if(r3.bulk!==conn){ try{conn.close();}catch(e){} } return; }
+      try{conn.close();}catch(e){}
+      if(!bulkRetry.has(key)) connectBulk(pid,attempt+1);
+    },12000);
+    conn._openTo=openTo;
+  },delay);
+  bulkRetry.set(key,to);
+}
+function ensureBulk(pid){ try{ if(!pid||pid===myId) return; const r=peers.get(pid); if(r&&r.bulk&&r.bulk.open) return; connectBulk(pid,0); }catch(e){} }
+function setupBulk(conn){
+  const pid=conn.peer; if(!pid||pid===myId){ try{conn.close();}catch(e){} return; }
+  const rec=peers.get(pid);
+  if(!rec||!rec.conn||!rec.conn.open){ try{conn.close();}catch(e){} return; } // control first
+  if(rec.bulk&&rec.bulk.open&&rec.bulk!==conn){ if(myId&&pid>myId){ try{conn.close();}catch(e){} return; } try{rec.bulk.close();}catch(e){} }
+  rec.bulk=conn;
+  conn.on('open',()=>{ if(conn._openTo){clearTimeout(conn._openTo);conn._openTo=null;} linkEvent(pid,'bulk-open'); onPeersChanged(); });
+  conn.on('data',msg=>handleMessage(pid,msg));
+  conn.on('close',()=>handleBulkClose(pid,conn));
+  conn.on('error',()=>handleBulkClose(pid,conn));
+  onPeersChanged();
+}
+function handleBulkClose(pid,conn){ const rec=peers.get(pid); if(!rec) return; if(conn&&rec.bulk&&rec.bulk!==conn) return; rec.bulk=null; onPeersChanged(); if(peer&&!peer.destroyed&&rec.conn&&rec.conn.open){ connectBulk(pid,1); } }
+function sendBulk(id,obj){ const rec=peers.get(id); if(!rec||!rec.bulk||!rec.bulk.open) return false; try{ rec.bulk.send(obj); rec.tx=(rec.tx||0)+1; return true; }catch(e){ return false; } }
 function reconcileMesh(){
   if(!peer||peer.destroyed||!myId) return;
   peers.forEach((rec,id)=>{
     if(id===myId) return;
-    if(rec.conn&&rec.conn.open) return;
+    if(rec.conn&&rec.conn.open){ if(!rec.bulk||!rec.bulk.open) connectBulk(id,0); return; }
     if(pendingRetry.has(id)) return;
     connectToPeer(id,1);
   });
@@ -351,20 +395,20 @@ function setupConn(conn){
   const pid=conn.peer; if(!pid||pid===myId){ try{conn.close();}catch(e){} return; }
   let rec=peers.get(pid);
   if(rec&&rec.conn&&rec.conn.open&&rec.conn!==conn){ if(myId&&pid>myId){ try{conn.close();}catch(e){} return; } try{rec.conn.close();}catch(e){} }
-  if(!rec){ rec={conn:null,id:pid,name:'…',lastPing:Date.now(),latency:-1,status:'green',stream:null,volume:1,pending:true}; peers.set(pid,rec); }
+  if(!rec){ rec={conn:null,bulk:null,id:pid,name:'…',lastPing:Date.now(),latency:-1,status:'green',stream:null,volume:1,pending:true}; peers.set(pid,rec); }
   rec.conn=conn;
-  conn.on('open',()=>{ if(conn._openTo){clearTimeout(conn._openTo);conn._openTo=null;} rec.lastPing=Date.now(); rec.status='green'; rec.greeted=true; rec.connOpen=true; rec.pending=false; try{delete lastConnErr[pid];}catch(e){} try{conn.send({t:'hello',id:myId,name:myName}); rec.tx=(rec.tx||0)+1;}catch(e){} sendPeerList(pid); linkEvent(pid,'open'); updateConn(true); onPeersChanged(); });
+  conn.on('open',()=>{ if(conn._openTo){clearTimeout(conn._openTo);conn._openTo=null;} rec.lastPing=Date.now(); rec.status='green'; rec.greeted=true; rec.connOpen=true; rec.pending=false; try{delete lastConnErr[pid];}catch(e){} try{conn.send({t:'hello',id:myId,name:myName}); rec.tx=(rec.tx||0)+1;}catch(e){} sendPeerList(pid); linkEvent(pid,'open'); updateConn(true); onPeersChanged(); try{ connectBulk(pid,0); }catch(e){} });
   conn.on('data',msg=>handleMessage(pid,msg));
   conn.on('close',()=>handleClose(pid));
   conn.on('error',(e)=>{ try{ const t=(e&&(e.type||e.message))||'conn-error'; lastConnErr[pid]=String(t).slice(0,40); rec.lastErr=lastConnErr[pid]; }catch(_){} handleClose(pid); });
   onPeersChanged();
 }
 function dropStale(id){ try{ const r=peers.get(id); if(r&&r.conn){ try{ r.conn.close(); }catch(e){} } }catch(e){} handleClose(id); }
-function handleClose(pid){ const rec0=peers.get(pid); if(rec0) rec0.connOpen=false; const had=peers.has(pid); if(had){ peers.delete(pid); try{ if(window.Media&&window.Media.removeVideo) window.Media.removeVideo(pid); }catch(e){} onPeersChanged(); } if(peer&&!peer.destroyed){ if(pid===ROOM_ID){ if(!pendingRetry.has(pid)) connectToPeer(pid,0); /* host: persistent even if rec already gone */ } else if(had){ connectToPeer(pid,1); } } }
+function handleClose(pid){ const rec0=peers.get(pid); if(rec0) rec0.connOpen=false; const had=peers.has(pid); if(had){ try{ if(rec0&&rec0.bulk){ try{rec0.bulk.close();}catch(e){} } }catch(e){} peers.delete(pid); try{ if(window.Media&&window.Media.removeVideo) window.Media.removeVideo(pid); }catch(e){} onPeersChanged(); } if(peer&&!peer.destroyed){ if(pid===ROOM_ID){ if(!pendingRetry.has(pid)) connectToPeer(pid,0); /* host: persistent even if rec already gone */ } else if(had){ connectToPeer(pid,1); } } }
 function handleMessage(pid,msg){
   if(!msg||typeof msg!=='object') return;
   let rec=peers.get(pid);
-  if(!rec){ rec={conn:null,id:pid,name:msg.name||'…',lastPing:Date.now(),latency:-1,status:'green',stream:null,volume:1}; peers.set(pid,rec); }
+  if(!rec){ rec={conn:null,bulk:null,id:pid,name:msg.name||'…',lastPing:Date.now(),latency:-1,status:'green',stream:null,volume:1}; peers.set(pid,rec); }
   rec.lastPing=Date.now(); rec.rx=(rec.rx||0)+1; rec.lastRx=Date.now(); if(rec.status!=='green'){rec.status='green';onPeersChanged();}
   const t=msg.t;
   if(typeof t==='string'&&t.startsWith('file-')){ emit('smc-file',pid,msg); return; }
@@ -410,7 +454,7 @@ function hostWatchdog(){
 function sendMeshSync(){ if(!myId) return; const list=[...peers.values()].filter(p=>!p.pending&&p.conn&&p.conn.open).map(p=>({id:p.id,name:p.name})); list.push({id:myId,name:myName}); broadcast({t:'mesh-sync',peers:list,id:myId,name:myName}); }
 function stopHeartbeat(){ if(hbTimer){clearInterval(hbTimer);hbTimer=null;} if(meshSyncTimer){clearInterval(meshSyncTimer);meshSyncTimer=null;} if(reconcileTimer){clearInterval(reconcileTimer);reconcileTimer=null;} if(hostTimer){clearInterval(hostTimer);hostTimer=null;} }
 function updateConn(ok){ const d=$('#connStatus'),l=$('#connLabel'); if(!d) return; d.className=ok?'on':'warn'; if(l) l.textContent=ok?('connected'+(isHost?' (host)':'') ):'connecting…'; }
-window.Search={ peers, get myId(){return myId;}, get myName(){return myName;}, get isHost(){return isHost;}, get peer(){return peer;}, get pendingCount(){ try{return pendingRetry.size;}catch(e){return 0;} }, get retrying(){ return !!initRetryTo; }, broadcast, sendTo, setName, joinRoom,
+window.Search={ peers, get myId(){return myId;}, get myName(){return myName;}, get isHost(){return isHost;}, get peer(){return peer;}, get pendingCount(){ try{return pendingRetry.size;}catch(e){return 0;} }, get retrying(){ return !!initRetryTo; }, broadcast, sendTo, sendBulk, ensureBulk, setName, joinRoom,
   get ROOM_ID(){return ROOM_ID;}, get roomPass(){ return currentPass(); } };
 window.addEventListener('beforeunload',()=>{ try{ broadcast({t:'presence',left:true,id:myId,name:myName}); peer&&peer.destroy(); }catch(e){} });
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
@@ -421,7 +465,7 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
    ============================================================ */
 (function FileV2Engine(){
 'use strict';
-const CHUNK=64*1024, ACK_TIMEOUT=3000, MAX_CWND=256, MEMORY_MAX=64*1024*1024, BLOB_URL_MAX=64*1024*1024, MISSING_INTERVAL=4000, SPEED_WINDOW=5000;
+const CHUNK=64*1024, ACK_TIMEOUT=3000, MAX_CWND=64, MEMORY_MAX=64*1024*1024, BLOB_URL_MAX=64*1024*1024, MISSING_INTERVAL=4000, SPEED_WINDOW=5000;
 const transfers=new Map();
 const uid=()=>'f'+Date.now().toString(36)+Math.random().toString(36).slice(2,10);
 const nowT=()=>Date.now(), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -430,10 +474,14 @@ const sanitize=n=>String(n||'file').replace(/[^\w.\-]+/g,'_').slice(0,80)||'file
 function netBroadcast(m){ try{ if(window.Search&&window.Search.broadcast) return window.Search.broadcast(m); }catch(_){} }
 function netSendTo(id,m){ try{ if(!id) return netBroadcast(m); if(window.Search&&window.Search.sendTo) return window.Search.sendTo(id,m); return netBroadcast(m); }catch(_){} }
 function netSend(t,m){ if(!t||t==='broadcast') return netBroadcast(m); return netSendTo(t,m); }
+function netBulkTo(id,m){ try{ if(window.Search&&window.Search.sendBulk&&window.Search.sendBulk(id,m)) return true; }catch(_){} return netSendTo(id,m); }
+function ensureBulkFor(pid){ try{ if(window.Search&&window.Search.ensureBulk) window.Search.ensureBulk(pid); }catch(_){} }
 function uiUpdate(tr){ try{ const pub=publicView(tr); if(window.FileUI&&window.FileUI.updateTransferUI) window.FileUI.updateTransferUI(pub); }catch(_){} }
 function uiRender(){}
-function publicView(tr){ if(!tr) return null; const done=tr.role==='send'?tr.acked.size:tr.receivedCount;
-  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.ackedBytes||tr.receivedBytes||0,cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,needsSave:!!(tr.role==='recv'&&tr.complete&&!tr.cancelled&&!tr.url&&tr.opfsHandle),confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
+function publicView(tr){ if(!tr) return null; let done,progress,bytes;
+  if(tr.role==='send'){ const a=aggSend(tr); done=a.done; progress=a.progress; bytes=a.bytes; }
+  else { done=tr.receivedCount; progress=tr.total?done/tr.total:0; bytes=tr.receivedBytes||0; }
+  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress,ackedBytes:bytes,cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,needsSave:!!(tr.role==='recv'&&tr.complete&&!tr.cancelled&&!tr.url&&tr.opfsHandle),confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
 const CRC_T=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; } return t; })();
 function crc32(data){ let c=0xFFFFFFFF; for(let i=0;i<data.length;i++) c=CRC_T[(c^data[i])&0xFF]^(c>>>8); return ((c^0xFFFFFFFF)>>>0).toString(16).padStart(8,'0'); }
 const num=n=>Math.floor(Number(n)); // full 53-bit size/index, never >>>0 (wraps past 4GiB)
@@ -443,40 +491,61 @@ async function chainHash(total,readSlice){ // chained SHA-256 over sequential sl
   if(num(total)===0){ return hexB(await crypto.subtle.digest('SHA-256',new Uint8Array(0))); }
   for(let off=0;off<total;off+=STEP){ const part=await readSlice(off,Math.min(total,off+STEP)); const buf=new Uint8Array(h.length+part.length); buf.set(h,0); buf.set(part,h.length); h=new Uint8Array(await crypto.subtle.digest('SHA-256',buf)); }
   return hexB(h.buffer); }
-function trackSpeed(tr,add){ const t=nowT(); tr.samples=tr.samples||[]; tr.ackedBytes=(tr.ackedBytes||0)+add; tr.samples.push({t,b:tr.ackedBytes}); while(tr.samples.length>2&&t-tr.samples[0].t>SPEED_WINDOW) tr.samples.shift();
-  if(tr.samples.length>=2){ const f=tr.samples[0],l=tr.samples[tr.samples.length-1]; const dt=(l.t-f.t)/1000,db=l.b-f.b; const v=dt>0.05?db/dt:0; tr.speedMBs=v/(1024*1024); tr.etaSec=v>1?Math.ceil((tr.size-tr.ackedBytes)/v):null; } else { tr.speedMBs=0; tr.etaSec=null; } }
+function trackSpeed(o,add,size){ const t=nowT(); o.samples=o.samples||[]; o.ackedBytes=(o.ackedBytes||0)+add; o.samples.push({t,b:o.ackedBytes}); while(o.samples.length>2&&t-o.samples[0].t>SPEED_WINDOW) o.samples.shift();
+  if(o.samples.length>=2){ const f=o.samples[0],l=o.samples[o.samples.length-1]; const dt=(l.t-f.t)/1000,db=l.b-f.b; const v=dt>0.05?db/dt:0; o.speedMBs=v/(1024*1024); o.etaSec=v>1?Math.ceil((size-o.ackedBytes)/v):null; } else { o.speedMBs=0; o.etaSec=null; } }
+function newLeg(){ return {acked:new Set(),inFlight:new Map(),retryQueue:[],nextIdx:0,cwnd:4,ssthresh:64,rttCount:0,pumpRunning:false,samples:[],ackedBytes:0,speedMBs:0,etaSec:null,done:false,cancelled:false}; }
+function openPeers(){ const out=[]; try{ const ps=window.Search&&window.Search.peers; if(ps) ps.forEach((r,id)=>{ try{ if(r.conn&&r.conn.open) out.push(id); }catch(_){} }); }catch(_){} return out; }
+function ensureLeg(tr,pid){ let leg=tr.legs.get(pid); if(!leg){ leg=newLeg(); tr.legs.set(pid,leg); } return leg; }
+function trackSpeedLeg(tr,leg,add){ trackSpeed(leg,add,tr.size); aggSend(tr); }
+function aggSend(tr){ // slowest-leg progress, summed uplink; cancelled legs don't drag the aggregate
+  let slow=1,n=0,sp=0,bmin=null,eta=null,cw=0;
+  tr.legs.forEach(l=>{ if(l.cancelled) return; n++; const p=tr.total?l.acked.size/tr.total:0; if(p<slow)slow=p; sp+=l.speedMBs||0;
+    const b=l.ackedBytes||0; if(bmin===null||b<bmin)bmin=b;
+    if(!l.done&&l.etaSec!=null&&(eta===null||l.etaSec>eta))eta=l.etaSec;
+    if((l.cwnd||0)>cw)cw=l.cwnd||0; });
+  if(!n) slow=tr.complete?1:0;
+  tr.speedMBs=n?sp:0; tr.etaSec=eta; tr.cwnd=cw;
+  return {done:n?Math.min(tr.total,Math.floor(slow*tr.total)):(tr.complete?tr.total:0),progress:n?slow:(tr.complete?1:0),bytes:bmin===null?0:bmin}; }
 async function opfsDir(){ try{ if(!navigator.storage||typeof navigator.storage.getDirectory!=='function') return null; return await navigator.storage.getDirectory(); }catch(_){ return null; } }
 async function sendFileV2(file,target){ if(!file) throw new Error('no file'); const tgt=target||'broadcast'; const id=uid(); const size=num(file.size); const total=Math.max(1,Math.ceil(size/CHUNK));
-  const tr={id,role:'send',file,name:file.name||'unnamed',size,total,fileType:file.type||'application/octet-stream',target:tgt,senderPeer:null,selfId:null,cwnd:4,ssthresh:64,rttCount:0,nextIdx:0,retryQueue:[],inFlight:new Map(),acked:new Set(),confirmations:new Set(),paused:false,cancelled:false,done:false,complete:false,startTime:nowT(),samples:[],ackedBytes:0,speedMBs:0,etaSec:null,hash:null,pumpRunning:false};
+  const tr={id,role:'send',file,name:file.name||'unnamed',size,total,fileType:file.type||'application/octet-stream',target:tgt,senderPeer:null,selfId:null,legs:new Map(),confirmations:new Set(),paused:false,cancelled:false,done:false,complete:false,startTime:nowT(),ackedBytes:0,speedMBs:0,etaSec:null,hash:null,cwnd:0};
   try{ tr.selfId=(window.Search&&(window.Search.myId))||null; }catch(_){}
   transfers.set(id,tr);
+  (tgt==='broadcast'?openPeers():[tgt]).forEach(pid=>{ if(pid){ ensureLeg(tr,pid); ensureBulkFor(pid); } });
   netSend(tgt,{t:'file-announce',id,name:tr.name,size,total,fileType:tr.fileType,sender:tr.selfId});
-  uiUpdate(tr); uiRender(); pumpSender(tr).catch(()=>{});
+  uiUpdate(tr); uiRender(); tr.legs.forEach((_,pid)=>pumpLeg(tr,pid).catch(()=>{}));
   chainHash(file.size,async (o,e)=>new Uint8Array(await file.slice(o,e).arrayBuffer())).then(h=>{ if(!h||tr.cancelled) return; tr.hash=h; netSend(tgt,{t:'file-hash',id,sha256:h}); uiUpdate(tr); }).catch(()=>{});
   return id; }
-async function sendOneChunk(tr,idx){ const off=idx*CHUNK,end=Math.min(tr.size,off+CHUNK); let buf; try{ buf=await tr.file.slice(off,end).arrayBuffer(); }catch(e){ tr.error='slice-failed'; uiUpdate(tr); return; }
+async function sendOneChunk(tr,leg,pid,idx){ const off=idx*CHUNK,end=Math.min(tr.size,off+CHUNK); let buf; try{ buf=await tr.file.slice(off,end).arrayBuffer(); }catch(e){ tr.error='slice-failed'; uiUpdate(tr); return; }
   const u8=new Uint8Array(buf), crc=crc32(u8), payload=u8.buffer.slice(0);
-  netSend(tr.target,{t:'file-chunk',id:tr.id,idx,crc,total:tr.total,data:payload});
-  const timer=setTimeout(()=>onChunkTimeout(tr.id,idx),ACK_TIMEOUT); tr.inFlight.set(idx,{sentAt:nowT(),timer}); }
-function pumpSender(tr){ if(tr.pumpRunning||tr.cancelled||tr.done||tr.paused) return Promise.resolve(); tr.pumpRunning=true;
-  const run=(async()=>{ while(!tr.cancelled&&!tr.done&&!tr.paused){ while(tr.inFlight.size<Math.floor(tr.cwnd)&&(tr.retryQueue.length>0||tr.nextIdx<tr.total)){ if(tr.paused||tr.cancelled) break; let idx; if(tr.retryQueue.length>0){ idx=tr.retryQueue.shift(); if(tr.acked.has(idx)||tr.inFlight.has(idx)) continue; } else idx=tr.nextIdx++; if(idx>=tr.total) break; await sendOneChunk(tr,idx); }
-    if(tr.acked.size>=tr.total){ finishSend(tr); break; }
-    if(tr.nextIdx>=tr.total&&tr.retryQueue.length===0){ if(tr.inFlight.size===0){ let rev=false; for(let i=0;i<tr.total;i++){ if(!tr.acked.has(i)&&!tr.inFlight.has(i)&&!tr.retryQueue.includes(i)){ tr.retryQueue.push(i); rev=true; } } if(!rev) break; continue; } break; }
-    if(tr.inFlight.size>=Math.floor(tr.cwnd)) break; if(tr.retryQueue.length===0&&tr.nextIdx>=tr.total) break; } uiUpdate(tr); })();
-  return run.finally(()=>{ tr.pumpRunning=false; }); }
-function decreaseCongestion(tr){ const half=Math.max(2,Math.floor(tr.cwnd/2)); tr.ssthresh=half; tr.cwnd=half; tr.rttCount=0; }
-function increaseCongestion(tr){ if(tr.cwnd<tr.ssthresh) tr.cwnd=Math.min(tr.ssthresh,tr.cwnd+1); else { tr.rttCount=(tr.rttCount||0)+1; if(tr.rttCount>=Math.max(1,Math.floor(tr.cwnd))){ tr.cwnd=Math.min(MAX_CWND,tr.cwnd+1); tr.rttCount=0; } } tr.cwnd=clamp(tr.cwnd,2,MAX_CWND); }
-function onAck(tr,idx){ const inf=tr.inFlight.get(idx); if(inf){ try{clearTimeout(inf.timer);}catch(_){} tr.inFlight.delete(idx); } else if(tr.acked.has(idx)) return; else return;
-  if(!tr.acked.has(idx)){ tr.acked.add(idx); trackSpeed(tr,chunkLen(idx,tr.total,tr.size)); increaseCongestion(tr); }
-  if(tr.acked.size>=tr.total) finishSend(tr); else pumpSender(tr).catch(()=>{}); uiUpdate(tr); }
-function onChunkTimeout(tid,idx){ const tr=transfers.get(tid); if(!tr||tr.role!=='send'||tr.cancelled||tr.done) return; if(tr.acked.has(idx)) return; tr.inFlight.delete(idx); decreaseCongestion(tr); if(!tr.retryQueue.includes(idx)) tr.retryQueue.unshift(idx); uiUpdate(tr); pumpSender(tr).catch(()=>{}); }
-function onMissing(tr,missing){ if(!Array.isArray(missing)||!missing.length) return; let applied=false; for(const raw of missing.slice(0,500)){ const idx=num(raw); if(idx>=tr.total) continue; if(tr.acked.has(idx)) tr.acked.delete(idx); const inf=tr.inFlight.get(idx); if(inf){ try{clearTimeout(inf.timer);}catch(_){} tr.inFlight.delete(idx); } if(!tr.retryQueue.includes(idx)) tr.retryQueue.push(idx); applied=true; }
-  if(applied){ decreaseCongestion(tr); if(!tr.paused&&!tr.cancelled&&!tr.done) pumpSender(tr).catch(()=>{}); uiUpdate(tr); } }
-function finishSend(tr){ if(tr.done) return; tr.done=true; tr.complete=true; for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); tr.speedMBs=0; tr.etaSec=0; uiUpdate(tr); uiRender(); }
+  netBulkTo(pid,{t:'file-chunk',id:tr.id,idx,crc,total:tr.total,data:payload});
+  const timer=setTimeout(()=>onChunkTimeout(tr.id,pid,idx),ACK_TIMEOUT); leg.inFlight.set(idx,{sentAt:nowT(),timer}); }
+function pumpLeg(tr,pid){ const leg=tr.legs.get(pid); if(!leg||leg.pumpRunning||leg.cancelled||leg.done||tr.cancelled||tr.done||tr.paused) return Promise.resolve(); leg.pumpRunning=true;
+  const run=(async()=>{ while(!leg.cancelled&&!leg.done&&!tr.cancelled&&!tr.done&&!tr.paused){ while(leg.inFlight.size<Math.floor(leg.cwnd)&&(leg.retryQueue.length>0||leg.nextIdx<tr.total)){ if(leg.cancelled||tr.paused||tr.cancelled) break; let idx; if(leg.retryQueue.length>0){ idx=leg.retryQueue.shift(); if(leg.acked.has(idx)||leg.inFlight.has(idx)) continue; } else idx=leg.nextIdx++; if(idx>=tr.total) break; await sendOneChunk(tr,leg,pid,idx); }
+    if(leg.acked.size>=tr.total){ finishLeg(tr,pid); break; }
+    if(leg.nextIdx>=tr.total&&leg.retryQueue.length===0){ if(leg.inFlight.size===0){ let rev=false; for(let i=0;i<tr.total;i++){ if(!leg.acked.has(i)&&!leg.inFlight.has(i)&&!leg.retryQueue.includes(i)){ leg.retryQueue.push(i); rev=true; } } if(!rev) break; continue; } break; }
+    if(leg.inFlight.size>=Math.floor(leg.cwnd)) break; if(leg.retryQueue.length===0&&leg.nextIdx>=tr.total) break; } uiUpdate(tr); })();
+  return run.finally(()=>{ leg.pumpRunning=false; }); }
+function decreaseCongestion(leg){ const half=Math.max(2,Math.floor(leg.cwnd/2)); leg.ssthresh=half; leg.cwnd=half; leg.rttCount=0; }
+function increaseCongestion(leg){ if(leg.cwnd<leg.ssthresh) leg.cwnd=Math.min(leg.ssthresh,leg.cwnd+1); else { leg.rttCount=(leg.rttCount||0)+1; if(leg.rttCount>=Math.max(1,Math.floor(leg.cwnd))){ leg.cwnd=Math.min(MAX_CWND,leg.cwnd+1); leg.rttCount=0; } } leg.cwnd=clamp(leg.cwnd,2,MAX_CWND); }
+function onAckLeg(tr,pid,idx){ if(tr.role!=='send') return; const leg=tr.legs.get(pid); if(!leg||leg.cancelled||leg.done) return; const inf=leg.inFlight.get(idx); if(inf){ try{clearTimeout(inf.timer);}catch(_){} leg.inFlight.delete(idx); } else if(leg.acked.has(idx)) return; else return;
+  if(!leg.acked.has(idx)){ leg.acked.add(idx); trackSpeedLeg(tr,leg,chunkLen(idx,tr.total,tr.size)); increaseCongestion(leg); }
+  if(leg.acked.size>=tr.total) finishLeg(tr,pid); else pumpLeg(tr,pid).catch(()=>{}); uiUpdate(tr); }
+function onChunkTimeout(tid,pid,idx){ const tr=transfers.get(tid); if(!tr||tr.role!=='send'||tr.cancelled||tr.done) return; const leg=tr.legs.get(pid); if(!leg||leg.cancelled||leg.done) return; if(leg.acked.has(idx)) return; leg.inFlight.delete(idx); decreaseCongestion(leg); if(!leg.retryQueue.includes(idx)) leg.retryQueue.unshift(idx); uiUpdate(tr); pumpLeg(tr,pid).catch(()=>{}); }
+function onMissingLeg(tr,pid,missing){ if(tr.role!=='send') return; const leg=tr.legs.get(pid); if(!leg||leg.cancelled||leg.done) return; if(!Array.isArray(missing)||!missing.length) return; let applied=false; for(const raw of missing.slice(0,500)){ const idx=num(raw); if(idx>=tr.total) continue; if(leg.acked.has(idx)) leg.acked.delete(idx); const inf=leg.inFlight.get(idx); if(inf){ try{clearTimeout(inf.timer);}catch(_){} leg.inFlight.delete(idx); } if(!leg.retryQueue.includes(idx)) leg.retryQueue.push(idx); applied=true; }
+  if(applied){ decreaseCongestion(leg); if(!leg.cancelled&&!tr.paused&&!tr.cancelled&&!tr.done) pumpLeg(tr,pid).catch(()=>{}); uiUpdate(tr); } }
+function legsSettled(tr){ let active=false; tr.legs.forEach(l=>{ if(!l.cancelled&&!l.done) active=true; }); return !active; }
+function finishLeg(tr,pid){ const leg=tr.legs.get(pid); if(!leg||leg.done) return; leg.done=true; for(const [,v] of leg.inFlight){ try{clearTimeout(v.timer);}catch(_){} } leg.inFlight.clear(); leg.speedMBs=0; leg.etaSec=0; aggSend(tr);
+  if(legsSettled(tr)){ if([...tr.legs.values()].some(l=>l.done)) finishSend(tr); else { tr.cancelled=true; tr.paused=false; } }
+  uiUpdate(tr); uiRender(); }
+function finishSend(tr){ if(tr.done) return; tr.done=true; tr.complete=true; tr.legs.forEach(l=>{ for(const [,v] of l.inFlight){ try{clearTimeout(v.timer);}catch(_){} } l.inFlight.clear(); }); tr.speedMBs=0; tr.etaSec=0; uiUpdate(tr); uiRender(); }
+function cancelLeg(tid,pid){ const tr=transfers.get(tid); if(!tr||tr.role!=='send') return false; const leg=tr.legs.get(pid); if(!leg||leg.done) return false; if(leg.cancelled) return true; leg.cancelled=true; for(const [,v] of leg.inFlight){ try{clearTimeout(v.timer);}catch(_){} } leg.inFlight.clear();
+  if(legsSettled(tr)){ if([...tr.legs.values()].some(l=>l.done)) finishSend(tr); else { tr.cancelled=true; tr.paused=false; } }
+  uiUpdate(tr); uiRender(); return true; }
 function pauseTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send') return false; tr.paused=true; uiUpdate(tr); return true; }
-function resumeTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send') return false; if(tr.cancelled||tr.done||tr.complete) return false; tr.paused=false; uiUpdate(tr); if(tr.role==='send') pumpSender(tr).catch(()=>{}); return true; }
+function resumeTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send') return false; if(tr.cancelled||tr.done||tr.complete) return false; tr.paused=false; uiUpdate(tr); if(tr.role==='send') tr.legs.forEach((l,pid)=>{ if(!l.cancelled&&!l.done) pumpLeg(tr,pid).catch(()=>{}); }); return true; }
 function cancelTransfer(id){ const tr=transfers.get(id); if(!tr) return false; tr.cancelled=true; tr.paused=false;
-  if(tr.role==='send'){ for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); netSend(tr.target,{t:'file-cancel',id:tr.id}); }
+  if(tr.role==='send'){ tr.legs.forEach(l=>{ for(const [,v] of l.inFlight){ try{clearTimeout(v.timer);}catch(_){} } l.inFlight.clear(); l.cancelled=true; }); netSend(tr.target,{t:'file-cancel',id:tr.id}); }
   else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } if(tr.senderPeer) netSendTo(tr.senderPeer,{t:'file-cancel',id:tr.id}); deleteOpfsFile(tr); }
   uiUpdate(tr); uiRender(); return true; }
 async function ensureRecvEntry(msg,peerId){ let tr=transfers.get(msg.id);
@@ -492,20 +561,22 @@ async function ensureRecvEntry(msg,peerId){ let tr=transfers.get(msg.id);
     uiUpdate(tr); uiRender(); return tr; }
   tr.missingTimer=setInterval(()=>requestMissingIfStalled(tr.id),MISSING_INTERVAL); uiUpdate(tr); uiRender(); return tr; }
 function toU8(d){ if(d instanceof Uint8Array) return d; if(d instanceof ArrayBuffer) return new Uint8Array(d); if(Array.isArray(d)) return Uint8Array.from(d); return null; }
-async function onChunkRecv(tr,msg,peerId){ if(tr.done||tr.cancelled||tr.complete||tr.paused) return; const idx=num(msg.idx); if(idx>=tr.total) return;
-  if(tr.receivedSet.has(idx)){ netSendTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); return; }
-  const u8=toU8(msg.data); if(!u8){ netSendTo(tr.senderPeer||peerId,{t:'file-missing',id:tr.id,missing:[idx]}); return; }
-  if(msg.crc&&String(msg.crc).toLowerCase()!==String(crc32(u8)).toLowerCase()){ netSendTo(tr.senderPeer||peerId,{t:'file-missing',id:tr.id,missing:[idx]}); return; }
+async function onChunkRecv(tr,msg,peerId){ if(tr.done||tr.complete||tr.paused) return;
+  if(tr.cancelled){ const t=nowT(); if(!tr.cancelNoteT||t-tr.cancelNoteT>5000){ tr.cancelNoteT=t; try{ netSendTo(tr.senderPeer||peerId,{t:'file-cancel',id:tr.id}); }catch(_){} } return; }
+  const idx=num(msg.idx); if(idx>=tr.total) return;
+  if(tr.receivedSet.has(idx)){ netBulkTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); return; }
+  const u8=toU8(msg.data); if(!u8){ netBulkTo(tr.senderPeer||peerId,{t:'file-missing',id:tr.id,missing:[idx]}); return; }
+  if(msg.crc&&String(msg.crc).toLowerCase()!==String(crc32(u8)).toLowerCase()){ netBulkTo(tr.senderPeer||peerId,{t:'file-missing',id:tr.id,missing:[idx]}); return; }
   try{ if(tr.useOPFS&&tr.writable){ const cp=new Uint8Array(u8.length); cp.set(u8); tr.writeLock=tr.writeLock.then(()=>tr.writable.write({type:'write',position:idx*CHUNK,data:cp})).catch(()=>{throw new Error('opfs-write');}); await tr.writeLock; }
     else { const cp=new Uint8Array(u8.length); cp.set(u8); tr.chunks.set(idx,cp); } }
   catch(_){ if(tr.size>MEMORY_MAX){ tr.cancelled=true; tr.error='storage-unavailable'; try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(__){} try{ netSendTo(tr.senderPeer,{t:'file-cancel',id:tr.id}); }catch(__){} deleteOpfsFile(tr); uiUpdate(tr); uiRender(); return; }
     try{ tr.useOPFS=false; if(tr.writable){ try{await tr.writable.abort();}catch(_){} tr.writable=null; } const cp=new Uint8Array(u8.length); cp.set(u8); tr.chunks.set(idx,cp); }catch(_){ return; } }
-  tr.receivedSet.add(idx); tr.receivedCount=tr.receivedSet.size; tr.receivedBytes+=u8.length; tr.ackedBytes=tr.receivedBytes; tr.lastActivity=nowT(); trackSpeed(tr,u8.length);
-  netSendTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); uiUpdate(tr);
+  tr.receivedSet.add(idx); tr.receivedCount=tr.receivedSet.size; tr.receivedBytes+=u8.length; tr.lastActivity=nowT(); trackSpeed(tr,u8.length,tr.size);
+  netBulkTo(tr.senderPeer||peerId,{t:'file-ack',id:tr.id,idx}); uiUpdate(tr);
   if(tr.receivedCount>=tr.total) await assembleRecv(tr.id); }
 function requestMissingIfStalled(id){ const tr=transfers.get(id); if(!tr||tr.role!=='recv'||tr.done||tr.cancelled||tr.complete||tr.paused) return; if(nowT()-tr.lastActivity<3000) return; if(tr.receivedCount>=tr.total) return;
   const missing=[]; for(let i=0;i<tr.total&&missing.length<200;i++) if(!tr.receivedSet.has(i)) missing.push(i);
-  if(missing.length){ try{ netSendTo(tr.senderPeer,{t:'file-missing',id:tr.id,missing}); }catch(_){} } }
+  if(missing.length){ try{ netBulkTo(tr.senderPeer,{t:'file-missing',id:tr.id,missing}); }catch(_){} } }
 function verifyRecvHash(tr){ if(!tr||tr.verifying||tr.hashOk!==null) return; tr.verifying=true;
   (async()=>{ try{
     if(!tr.expectedHash||!crypto.subtle){ tr.verifying=false; return; }
@@ -543,22 +614,26 @@ async function saveToDisk(id){ const tr=transfers.get(id); if(!tr||tr.role!=='re
     try{ const a=document.createElement('a'); a.href=url; a.download=tr.name||('file-'+id); document.body.appendChild(a); a.click(); setTimeout(()=>{try{a.remove();}catch(_){}},500); }finally{ setTimeout(()=>{try{URL.revokeObjectURL(url);}catch(_){}},30000); }
     return true;
   }catch(e){ if(e&&e.name==='AbortError') return false; tr.error=String((e&&e.message)||e); uiUpdate(tr); return false; } }
-function handleHello(peerId){ if(!peerId) return; let me=null; try{ me=window.Search&&window.Search.myId; }catch(_){}
+function handleHello(peerId){ if(!peerId) return; ensureBulkFor(peerId); let me=null; try{ me=window.Search&&window.Search.myId; }catch(_){}
   for(const tr of transfers.values()){ if(tr.cancelled||tr.done) continue;
     if(tr.role!=='send') continue;
     if(me&&tr.selfId!==me) tr.selfId=me; // we may have reclaimed a new peer ID since the transfer started
+    if(tr.target!=='broadcast'&&tr.target!==peerId) continue; // targeted send: not for them
+    let leg=tr.legs.get(peerId);
+    if(leg&&(leg.cancelled||leg.done)) continue; // they opted out or are already served
+    if(!leg) leg=ensureLeg(tr,peerId); // late joiner
     try{ const ann={t:'file-announce',id:tr.id,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.selfId}; if(tr.hash) ann.sha256=tr.hash; netSendTo(peerId,ann); }catch(_){}
-    try{ pumpSender(tr).catch(()=>{}); }catch(_){} // nudge stalled senders now that a peer is back
+    try{ pumpLeg(tr,peerId).catch(()=>{}); }catch(_){} // nudge stalled senders now that a peer is back
   } }
 async function handleFileMsg(msg,peerId){ try{ if(!msg||typeof msg.t!=='string') return false; if(msg.t==='hello'){ handleHello(peerId); return false; } if(!msg.t.startsWith('file-')) return false;
     switch(msg.t){
       case 'file-announce': if(msg.id==null||msg.size==null||msg.total==null) return true; { const tr=await ensureRecvEntry(msg,peerId); if(tr&&tr.role==='recv'&&!tr.done&&!tr.complete&&!tr.cancelled&&tr.receivedCount>0&&tr.receivedCount<tr.total){ tr.lastActivity=0; try{ requestMissingIfStalled(tr.id); }catch(_){} } } return true;
       case 'file-hash': { const tr=transfers.get(msg.id); if(tr&&tr.role==='recv'){ tr.expectedHash=String(msg.sha256||'').toLowerCase()||null; if(tr.complete&&!tr.cancelled) verifyRecvHash(tr); uiUpdate(tr); } return true; }
       case 'file-chunk': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='recv') return true; if(peerId&&tr.senderPeer!==peerId) tr.senderPeer=peerId; await onChunkRecv(tr,msg,peerId); return true; }
-      case 'file-ack': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='send') return true; onAck(tr,num(msg.idx)); return true; }
-      case 'file-missing': { const tr=transfers.get(msg.id); if(!tr) return true; if(tr.role==='send') onMissing(tr,msg.missing); return true; }
-      case 'file-done-ack': { const tr=transfers.get(msg.id); if(tr&&tr.role==='send'&&peerId){ tr.confirmations.add(peerId); uiUpdate(tr); } return true; }
-      case 'file-cancel': { const tr=transfers.get(msg.id); if(tr&&!tr.complete){ tr.cancelled=true; if(tr.role==='send'){ for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); } else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } } uiUpdate(tr); uiRender(); } return true; }
+      case 'file-ack': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='send') return true; onAckLeg(tr,peerId,num(msg.idx)); return true; }
+      case 'file-missing': { const tr=transfers.get(msg.id); if(!tr) return true; if(tr.role==='send') onMissingLeg(tr,peerId,msg.missing); return true; }
+      case 'file-done-ack': { const tr=transfers.get(msg.id); if(tr&&tr.role==='send'&&peerId){ tr.confirmations.add(peerId); finishLeg(tr,peerId); uiUpdate(tr); } return true; }
+      case 'file-cancel': { const tr=transfers.get(msg.id); if(tr&&!tr.complete){ if(tr.role==='send'){ cancelLeg(msg.id,peerId); } else { tr.cancelled=true; try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } deleteOpfsFile(tr); uiUpdate(tr); uiRender(); } } return true; }
       default: return false; } }catch(_){ return true; } }
 window.FileV2={sendFileV2,pauseTransfer,resumeTransfer,cancelTransfer,saveToDisk,transfers,handleFileMsg};
 })();
