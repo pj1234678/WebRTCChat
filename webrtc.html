@@ -158,7 +158,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     </form>
     <div class="side-h"><span>Peers — <span id="peerCountSide">0</span></span><span>mesh</span></div>
     <div id="peerList"></div>
-    <div class="self-note">v2.8 • Drag right edge to resize • &lt;900px becomes drawer</div>
+    <div class="self-note">v2.9 • Drag right edge to resize • &lt;900px becomes drawer</div>
     <details id="diagBox"><summary>Diagnostics</summary><div id="diagLines">not joined yet</div></details>
     <div id="dragEdge" title="Resize"></div>
   </aside>
@@ -223,7 +223,7 @@ function roomIdFromPass(p){ p=String(p||'').trim(); if(!p) return ROOM_PREFIX+'s
 let ROOM_ID=roomIdFromPass((function(){ try{ return localStorage.getItem('smc_room_pass')||'secretpassword'; }catch(e){ return 'secretpassword'; } })());
 function currentPass(){ if(ROOM_ID.indexOf(ROOM_PREFIX)===0) return ROOM_ID.slice(ROOM_PREFIX.length); return ROOM_ID; }
 const HB_INTERVAL=5000, WARN_AFTER=20000, DEAD_AFTER=40000, PENDING_AFTER=35000, MAX_RETRY=5; // PENDING_AFTER > openTo(25s): don't reap dials still in flight; guest-guest retries forever (see connectToPeer)
-let peer=null,myId=null,isHost=false,hbTimer=null,meshSyncTimer=null,reconcileTimer=null,hostTimer=null,epoch=0,initAttempt=0,initRetryTo=null,lastMeshUp=0,lastReclaim=0;
+let peer=null,myId=null,isHost=false,hbTimer=null,meshSyncTimer=null,reconcileTimer=null,hostTimer=null,epoch=0,initAttempt=0,initRetryTo=null,lastMeshUp=0,lastReclaim=0,lastHostUp=0;
 const peers=new Map();
 const pendingRetry=new Map();
 const meshMembers=new Map(); // id -> lastSeenMs; survives handleClose so reconcileMesh can resurrect forgotten peers (no more manual rejoin)
@@ -294,10 +294,10 @@ function attachPeer(p,hostMode){
   peer=p;
   const myEpoch=++epoch;
   const alive=()=>myEpoch===epoch;
-  peer.on('open', id=>{ if(!alive()){ try{p.destroy();}catch(e){} return; } myId=id; isHost=hostMode; lastMeshUp=Date.now(); lastReclaim=0; updateRoomUI(); hideErr();
+  peer.on('open', id=>{ if(!alive()){ try{p.destroy();}catch(e){} return; } myId=id; isHost=hostMode; lastMeshUp=Date.now(); lastHostUp=Date.now(); lastReclaim=0; updateRoomUI(); hideErr();
     initAttempt=0; if(initRetryTo){ try{clearTimeout(initRetryTo);}catch(e){} initRetryTo=null; }
     startHeartbeat(); if(!hostMode) connectToPeer(ROOM_ID,0); setTimeout(()=>broadcast({t:'hello',id:myId,name:myName}),300);
-    updateConn(true); emit('smc-open',myId,{isHost}); });
+    updateConn(isHost); emit('smc-open',myId,{isHost}); });
   peer.on('connection', c=>{ if(!alive()){ try{c.close();}catch(e){} return; } if(c.label&&c.label!==CHANNEL) return; try{ c._outgoing=false; }catch(e){} setupConn(c); });
   peer.on('call', call=>{ if(!alive()) return; try{ if(window.Media && window.Media.onIncomingCall) window.Media.onIncomingCall(call); }catch(e){} });
   peer.on('disconnected', ()=>{ if(!alive()) return; try{ peer.reconnect(); }catch(e){} updateConn(false); });
@@ -318,7 +318,7 @@ function onPeerUnavailable(){
   }catch(e){}
   const k='pu:'+ROOM_ID, nowPu=Date.now(), lastPu=errSeen.get(k)||0;
   if(nowPu-lastPu<60000) return; errSeen.set(k,nowPu);
-  noteError('Room "'+currentPass()+'" has no host online (peer-unavailable). Keep this window open, then Join from a 2nd window/device with the SAME password — the first one in becomes host.');
+  noteError('Room "'+currentPass()+'" has no host online (peer-unavailable). Keep this window open — a connected peer will auto-reclaim host shortly, or Join from a 2nd window/device with the SAME password.');
 }
 function connectToPeer(pid,attempt=0){
   if(!pid||pid===myId||!peer||peer.destroyed) return;
@@ -367,6 +367,7 @@ function reconcileMesh(){
     connectToPeer(id,1);
   });
   try{ sendMeshSync(); }catch(e){}
+  try{ refreshConnLabel(); }catch(e){}
   onPeersChanged();
 }
 function setupConn(conn){
@@ -393,7 +394,7 @@ function setupConn(conn){
   if(!rec){ rec={conn:null,id:pid,name:'…',lastPing:Date.now(),latency:-1,status:'green',stream:null,volume:1,pending:true}; peers.set(pid,rec); }
   try{ if(pid&&pid!==myId) meshMembers.set(pid,Date.now()); }catch(e){}
   rec.conn=conn;
-  conn.on('open',()=>{ if(rec.conn!==conn){ try{ if(conn._openTo) clearTimeout(conn._openTo); }catch(e){} try{conn.close();}catch(e){} return; } if(conn._openTo){clearTimeout(conn._openTo);conn._openTo=null;} rec.lastPing=Date.now(); rec.status='green'; rec.greeted=true; rec.connOpen=true; rec.pending=false; try{delete lastConnErr[pid];}catch(e){} try{conn.send({t:'hello',id:myId,name:myName}); rec.tx=(rec.tx||0)+1;}catch(e){} sendPeerList(pid); linkEvent(pid,'open'); updateConn(true); onPeersChanged(); rec.helloRx=false; rec.helloTries=0; if(rec._helloTimer){try{clearTimeout(rec._helloTimer);}catch(e){} rec._helloTimer=null;} const helloRetry=()=>{ try{ if(rec.conn!==conn) return; try{ if(!conn.open) return; }catch(e){ return; } if(rec.helloRx) return; if((rec.helloTries||0)>=3) return; rec.helloTries=(rec.helloTries||0)+1; try{conn.send({t:'hello',id:myId,name:myName}); rec.tx=(rec.tx||0)+1;}catch(e){} if(!rec.helloRx&&(rec.helloTries||0)<3) rec._helloTimer=setTimeout(helloRetry,3000); }catch(e){} }; rec._helloTimer=setTimeout(helloRetry,3000); });
+  conn.on('open',()=>{ if(rec.conn!==conn){ try{ if(conn._openTo) clearTimeout(conn._openTo); }catch(e){} try{conn.close();}catch(e){} return; } if(conn._openTo){clearTimeout(conn._openTo);conn._openTo=null;} rec.lastPing=Date.now(); rec.status='green'; rec.greeted=true; rec.connOpen=true; rec.pending=false; try{ if(pid===ROOM_ID) lastHostUp=Date.now(); }catch(e){} try{delete lastConnErr[pid];}catch(e){} try{conn.send({t:'hello',id:myId,name:myName}); rec.tx=(rec.tx||0)+1;}catch(e){} sendPeerList(pid); linkEvent(pid,'open'); updateConn(true); onPeersChanged(); rec.helloRx=false; rec.helloTries=0; if(rec._helloTimer){try{clearTimeout(rec._helloTimer);}catch(e){} rec._helloTimer=null;} const helloRetry=()=>{ try{ if(rec.conn!==conn) return; try{ if(!conn.open) return; }catch(e){ return; } if(rec.helloRx) return; if((rec.helloTries||0)>=3) return; rec.helloTries=(rec.helloTries||0)+1; try{conn.send({t:'hello',id:myId,name:myName}); rec.tx=(rec.tx||0)+1;}catch(e){} if(!rec.helloRx&&(rec.helloTries||0)<3) rec._helloTimer=setTimeout(helloRetry,3000); }catch(e){} }; rec._helloTimer=setTimeout(helloRetry,3000); });
   conn.on('data',msg=>handleMessage(pid,msg,conn));
   conn.on('close',()=>{ try{ if(rec._helloTimer&&rec.conn===conn){clearTimeout(rec._helloTimer); rec._helloTimer=null;} }catch(e){} handleClose(pid,conn); });
   conn.on('error',(e)=>{ try{ if(rec._helloTimer&&rec.conn===conn){clearTimeout(rec._helloTimer); rec._helloTimer=null;} }catch(_){} try{ const t=(e&&(e.type||e.message))||'conn-error'; lastConnErr[pid]=String(t).slice(0,40); rec.lastErr=lastConnErr[pid]; }catch(_){} handleClose(pid,conn); });
@@ -419,6 +420,7 @@ function handleClose(pid,closedConn){
     // so we stop dialing the dead id instead of chasing it forever.
     if(wanted&&!pendingRetry.has(pid)) connectToPeer(pid,1); // retry-forever for all mesh links
   }
+  try{ refreshConnLabel(); }catch(e){}
 }
 function handleMessage(pid,msg,srcConn){
   if(!msg||typeof msg!=='object') return;
@@ -433,7 +435,7 @@ function handleMessage(pid,msg,srcConn){
     case 'hello': rec.helloRx=true; if(rec._helloTimer){try{clearTimeout(rec._helloTimer);}catch(e){} rec._helloTimer=null;} if(msg.name) rec.name=String(msg.name).slice(0,24); if(!rec.greeted){ rec.greeted=true; sendTo(pid,{t:'hello',id:myId,name:myName}); sendPeerList(pid); } try{ if(window.FileV2&&window.FileV2.handleFileMsg) window.FileV2.handleFileMsg(msg,pid); }catch(e){} linkEvent(pid,'hello',rec.name); emit('smc-presence',pid,{name:rec.name}); onPeersChanged(); break;
     case 'peer-list': case 'mesh-sync':
       if(msg.name) rec.name=String(msg.name).slice(0,24);
-      if(Array.isArray(msg.peers)){ msg.peers.forEach(p=>{ if(!p||!p.id||p.id===myId||p.id===pid) return; try{ meshMembers.set(p.id,Date.now()); }catch(e){} const cur=peers.get(p.id); if(cur&&cur.conn&&cur.conn.open) return; if(pendingRetry.has(p.id)){ const last=lastDialAt.get(p.id)||0; if(Date.now()-last>10000){ try{clearTimeout(pendingRetry.get(p.id));}catch(e){} pendingRetry.delete(p.id); connectToPeer(p.id,0); } return; } connectToPeer(p.id,0); }); onPeersChanged(); }
+      if(Array.isArray(msg.peers)){ try{ if(msg.peers.some(function(p){ return p&&p.id===ROOM_ID; })) lastHostUp=Date.now(); }catch(e){} msg.peers.forEach(p=>{ if(!p||!p.id||p.id===myId||p.id===pid) return; try{ meshMembers.set(p.id,Date.now()); }catch(e){} const cur=peers.get(p.id); if(cur&&cur.conn&&cur.conn.open) return; if(pendingRetry.has(p.id)){ const last=lastDialAt.get(p.id)||0; if(Date.now()-last>10000){ try{clearTimeout(pendingRetry.get(p.id));}catch(e){} pendingRetry.delete(p.id); connectToPeer(p.id,0); } return; } connectToPeer(p.id,0); }); onPeersChanged(); }
       if(t==='mesh-sync') emit('smc-sync',pid,msg); break;
     case 'chat': emit('smc-chat',pid,msg); break;
     case 'typing': emit('smc-typing',pid,msg); break;
@@ -447,30 +449,40 @@ function handleMessage(pid,msg,srcConn){
 function sendPeerList(pid){ const list=[...peers.values()].filter(p=>p.id!==pid&&p.conn&&p.conn.open&&!p.pending).map(p=>({id:p.id,name:p.name})); list.push({id:myId,name:myName}); sendTo(pid,{t:'peer-list',peers:list,id:myId,name:myName}); }
 function broadcast(obj){ peers.forEach(rec=>{ try{ if(rec.conn&&rec.conn.open){ rec.conn.send(obj); rec.tx=(rec.tx||0)+1; } }catch(e){} }); }
 function sendTo(id,obj){ const rec=peers.get(id); if(!rec||!rec.conn||!rec.conn.open) return false; try{ rec.conn.send(obj); rec.tx=(rec.tx||0)+1; return true; }catch(e){ return false; } }
-function startHeartbeat(){ stopHeartbeat(); if(!lastMeshUp) lastMeshUp=Date.now(); hbTimer=setInterval(()=>{ const nowT=Date.now(); peers.forEach((rec,id)=>{ try{ if(rec.conn&&rec.conn.open) rec.conn.send({t:'ping',ts:nowT,id:myId}); }catch(e){} const idle=nowT-(rec.lastPing||nowT); if(rec.pending){ if(idle>PENDING_AFTER&&!pendingRetry.has(id)){ const oc=rec.conn&&rec.conn._openTo; if(!oc) dropStale(id); } } else if(idle>DEAD_AFTER){ dropStale(id); } else if(idle>WARN_AFTER&&rec.status!=='yellow'){ rec.status='yellow'; } }); onPeersChanged(); },HB_INTERVAL); meshSyncTimer=setInterval(()=>{ sendMeshSync(); },15000); reconcileTimer=setInterval(()=>{ reconcileMesh(); },10000); hostTimer=setInterval(()=>{ hostWatchdog(); },10000); }
+function startHeartbeat(){ stopHeartbeat(); if(!lastMeshUp) lastMeshUp=Date.now(); hbTimer=setInterval(()=>{ const nowT=Date.now(); peers.forEach((rec,id)=>{ try{ if(rec.conn&&rec.conn.open) rec.conn.send({t:'ping',ts:nowT,id:myId}); }catch(e){} const idle=nowT-(rec.lastPing||nowT); if(rec.pending){ if(idle>PENDING_AFTER&&!pendingRetry.has(id)){ const oc=rec.conn&&rec.conn._openTo; if(!oc) dropStale(id); } } else if(idle>DEAD_AFTER){ dropStale(id); } else if(idle>WARN_AFTER&&rec.status!=='yellow'){ rec.status='yellow'; } }); try{ let _o=0; peers.forEach(function(r){ if(r.conn&&r.conn.open) _o++; }); updateConn(!!(isHost||_o>0)); }catch(e){} onPeersChanged(); },HB_INTERVAL); meshSyncTimer=setInterval(()=>{ sendMeshSync(); },15000); reconcileTimer=setInterval(()=>{ reconcileMesh(); },10000); hostTimer=setInterval(()=>{ hostWatchdog(); },10000); }
 function hostWatchdog(){
   try{
     if(!peer||peer.destroyed||!myId) return;
-    let open=0;
-    try{ peers.forEach(r=>{ if(r.conn&&r.conn.open) open++; }); }catch(e){}
-    if(open>0||isHost){ lastMeshUp=Date.now(); return; }
-    if(pendingRetry.has(ROOM_ID)) return; // host dial already in flight
+    let open=0, hostOpen=false;
+    try{ peers.forEach(r=>{ if(r.conn&&r.conn.open) open++; }); const h=peers.get(ROOM_ID); if(h&&h.conn&&h.conn.open) hostOpen=true; }catch(e){}
+    if(isHost){ lastMeshUp=Date.now(); lastHostUp=Date.now(); return; }
+    if(hostOpen){ lastMeshUp=Date.now(); lastHostUp=Date.now(); return; }
+    if(open>0){ lastMeshUp=Date.now(); } // pair link alive, but host path tracked separately below
+    // host dial already in flight and recent: give openTo (25s) room
+    if(pendingRetry.has(ROOM_ID)){ try{ if(Date.now()-(lastDialAt.get(ROOM_ID)||0)<35000) return; }catch(e){ return; } }
     const now=Date.now();
-    if(now-lastMeshUp<25000) return; // grace after last healthy mesh
+    if(now-lastHostUp<30000) return; // host seen recently (direct or in gossip) or just joined
     if(now-lastReclaim<15000) return; // don't flap
     lastReclaim=now;
-    try{ noteError('No mesh peers for a while — trying to reclaim host…'); }catch(e){}
+    try{ noteError('Host missing for a while — trying to become host…'); }catch(e){}
     setTimeout(()=>{ try{
-      if(!peer||peer.destroyed||!myId) return;
-      let o=0; try{ peers.forEach(r=>{ if(r.conn&&r.conn.open) o++; }); }catch(e){}
-      if(o>0||isHost||pendingRetry.has(ROOM_ID)) return;
-      teardownMesh(); tryHost(); // loser of the race falls back to guest via unavailable-id-taken
-    }catch(e){} }, Math.floor(Math.random()*4000)); // jitter so two orphans don't collide
+      if(!peer||peer.destroyed||!myId||isHost) return;
+      let ho=false;
+      try{ const h2=peers.get(ROOM_ID); if(h2&&h2.conn&&h2.conn.open) ho=true; }catch(e){}
+      if(ho) return;
+      if(Date.now()-lastHostUp<30000) return; // host reappeared meanwhile
+      if(pendingRetry.has(ROOM_ID)){ try{ if(Date.now()-(lastDialAt.get(ROOM_ID)||0)<35000) return; }catch(e){ return; } }
+      // NOTE: no open>0 veto here (the fix): a surviving guest pair must still reclaim
+      // the dead host id, or a third device can never join (peer-unavailable forever).
+      // Server arbitrates the race; losers fall back to guest via unavailable-id-taken.
+      teardownMesh(); tryHost();
+    }catch(e){} }, Math.floor(Math.random()*4000)); // jitter so reclaimers don't collide
   }catch(e){}
 }
 function sendMeshSync(){ if(!myId) return; const list=[...peers.values()].filter(p=>!p.pending&&p.conn&&p.conn.open).map(p=>({id:p.id,name:p.name})); list.push({id:myId,name:myName}); broadcast({t:'mesh-sync',peers:list,id:myId,name:myName}); }
 function stopHeartbeat(){ if(hbTimer){clearInterval(hbTimer);hbTimer=null;} if(meshSyncTimer){clearInterval(meshSyncTimer);meshSyncTimer=null;} if(reconcileTimer){clearInterval(reconcileTimer);reconcileTimer=null;} if(hostTimer){clearInterval(hostTimer);hostTimer=null;} }
 function updateConn(ok){ const d=$('#connStatus'),l=$('#connLabel'); if(!d) return; d.className=ok?'on':'warn'; if(l) l.textContent=ok?('connected'+(isHost?' (host)':'') ):'connecting…'; }
+function refreshConnLabel(){ try{ let open=0; peers.forEach(r=>{ if(r.conn&&r.conn.open) open++; }); updateConn(!!(isHost||open>0)); }catch(e){} }
 window.Search={ peers, get myId(){return myId;}, get myName(){return myName;}, get isHost(){return isHost;}, get peer(){return peer;}, get pendingCount(){ try{return pendingRetry.size;}catch(e){return 0;} }, get retrying(){ return !!initRetryTo; }, get knownMesh(){ try{ return [...meshMembers.keys()]; }catch(e){ return []; } }, broadcast, sendTo, setName, joinRoom,
   get ROOM_ID(){return ROOM_ID;} };
 window.addEventListener('beforeunload',()=>{ try{ broadcast({t:'presence',left:true,id:myId,name:myName}); peer&&peer.destroy(); }catch(e){} });
@@ -997,7 +1009,7 @@ $('#btnScreen').addEventListener('click',async e=>{
   }catch(err){ toast('Screen share cancelled'); }
 });
 window.addEventListener('smc-open',()=>{ renderPeers(); try{ if(window.Media&&window.Media.local){ window.Media.local.getAudioTracks().forEach(t=>{ try{ t.enabled=true; }catch(e){} }); const mb=$('#btnMic'); if(mb){ mb.classList.remove('off'); mb.textContent='🎙️'; } } }catch(e){} });
-addMsg({sys:true,text:'🚀 Super Mesh Chat v2.8 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
+addMsg({sys:true,text:'🚀 Super Mesh Chat v2.9 ready — type the room password in the sidebar and press Join (or Enter). Share the same password with peers to meet in one room.'});
 renderPeers();
 /* startup: prime mic+camera permission, but leave camera OFF until user presses Cam */
 try{ if(window.Media&&window.Media.primePermissions) window.Media.primePermissions(); }catch(e){}
