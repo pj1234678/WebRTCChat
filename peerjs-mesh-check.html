@@ -691,8 +691,12 @@ try {
   const tu = localStorage.getItem('mc_turn_url'); $('#turnUrl').value = tu || DEFAULT_TURN_URL || '';
   const tn = localStorage.getItem('mc_turn_user'); $('#turnUser').value = tn || DEFAULT_TURN_USER || '';
   const tp = localStorage.getItem('mc_turn_pass'); $('#turnPass').value = tp || DEFAULT_TURN_PASS || '';
-  const ta = localStorage.getItem('mc_turn_apiurl'); if (ta) $('#turnApiUrl').value = ta;
-  else if (typeof DEFAULT_TURN_APIURL !== 'undefined' && DEFAULT_TURN_APIURL) $('#turnApiUrl').value = DEFAULT_TURN_APIURL;
+  const ta = localStorage.getItem('mc_turn_apiurl');
+  // File default wins while testing: an earlier bad key saved in localStorage
+  // would otherwise keep 401ing forever (that's what just happened).
+  const apiDefault = (typeof DEFAULT_TURN_APIURL !== 'undefined' && DEFAULT_TURN_APIURL) || '';
+  $('#turnApiUrl').value = apiDefault || ta || '';
+  try { localStorage.setItem('mc_turn_apiurl', $('#turnApiUrl').value); } catch(e){}
 } catch(e){}
 $('#inName').onchange = e => { try { localStorage.setItem('smc_name', e.target.value); } catch(_){} };
 window.addEventListener('beforeunload', () => { try { peer && peer.destroy(); } catch(e){} });
