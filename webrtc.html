@@ -158,6 +158,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
     </form>
     <div class="side-h"><span>Peers — <span id="peerCountSide">0</span></span><span>mesh</span></div>
     <div id="peerList"></div>
+    <div style="margin:0 16px 10px"><button id="btnExit" class="icon-btn" style="width:100%;background:var(--red);color:#fff;font-weight:800" title="Close this tab">Exit</button></div>
     <div class="self-note">v2.9 • Drag right edge to resize • &lt;900px becomes drawer</div>
     <details id="diagBox"><summary>Diagnostics</summary><div id="diagLines">not joined yet</div></details>
     <div id="dragEdge" title="Resize"></div>
@@ -202,6 +203,7 @@ const $ = s => document.querySelector(s);
 const pad2 = n => String(n).padStart(2,'0');
 const fmtBytes = b => b<1024? b+' B' : b<1048576? (b/1024).toFixed(1)+' KB' : (b/1048576).toFixed(2)+' MB';
 const fmtETA = s => s==null? '—' : s<60? s+'s' : Math.floor(s/60)+'m '+pad2(s%60)+'s';
+function declineName(id){ try{ const r=window.Search&&window.Search.peers.get(id); if(r&&r.name&&r.name!=='…') return r.name; }catch(e){} id=String(id||''); return id.length>10?id.slice(0,6)+'…':(id||'?'); }
 function toast(m){ const t=$('#toast'); t.textContent=m; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',2500); }
 function showErr(m){ const b=$('#errBanner'); b.textContent=m; b.style.display='block'; }
 
@@ -560,7 +562,7 @@ function netSend(t,m){ if(!t||t==='broadcast') return netBroadcast(m); return ne
 function uiUpdate(tr){ try{ const pub=publicView(tr); if(window.FileUI&&window.FileUI.updateTransferUI) window.FileUI.updateTransferUI(pub); }catch(_){} }
 function uiRender(){}
 function publicView(tr){ if(!tr) return null; const done=tr.role==='send'?tr.acked.size:tr.receivedCount;
-  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.role==='send'?(tr.ackedBytes||0):(tr.receivedBytes||0),cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,confirmations:tr.confirmations?[...tr.confirmations]:[],error:tr.error||null }; }
+  return { id:tr.id,role:tr.role,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.senderPeer||tr.selfId||null,target:tr.target||null,done,totalChunks:tr.total,progress:tr.total?done/tr.total:0,ackedBytes:tr.role==='send'?(tr.ackedBytes||0):(tr.receivedBytes||0),cwnd:tr.cwnd,ssthresh:tr.ssthresh,paused:!!tr.paused,cancelled:!!tr.cancelled,doneSending:!!tr.done,complete:!!tr.complete,speedMBs:tr.speedMBs||0,etaSec:tr.etaSec??null,hash:tr.hash||tr.expectedHash||null,hashOk:tr.hashOk??null,url:tr.url||null,isImage:!!tr.isImage,confirmations:tr.confirmations?[...tr.confirmations]:[],declined:tr.declinedPeers?[...tr.declinedPeers]:[],declinedAll:!!tr.declinedAll,error:tr.error||null }; }
 const CRC_T=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; } return t; })();
 function crc32(data){ let c=0xFFFFFFFF; for(let i=0;i<data.length;i++) c=CRC_T[(c^data[i])&0xFF]^(c>>>8); return ((c^0xFFFFFFFF)>>>0).toString(16).padStart(8,'0'); }
 async function sha256Whole(file){ const PART=2*1024*1024, size=file.size; if(!crypto.subtle) throw new Error('no-subtle');
@@ -572,7 +574,7 @@ function trackSpeed(tr,add){ const t=nowT(); tr.samples=tr.samples||[]; tr.acked
   if(tr.samples.length>=2){ const f=tr.samples[0],l=tr.samples[tr.samples.length-1]; const dt=(l.t-f.t)/1000,db=l.b-f.b; const v=dt>0.05?db/dt:0; tr.speedMBs=v/(1024*1024); tr.etaSec=v>1?Math.ceil((tr.size-tr.ackedBytes)/v):null; } else { tr.speedMBs=0; tr.etaSec=null; } }
 async function opfsDir(){ try{ if(!navigator.storage||typeof navigator.storage.getDirectory!=='function') return null; return await navigator.storage.getDirectory(); }catch(_){ return null; } }
 async function sendFileV2(file,target){ if(!file) throw new Error('no file'); const tgt=target||'broadcast'; const id=uid(); const size=file.size; const total=Math.max(1,Math.ceil(size/CHUNK));
-  const tr={id,role:'send',file,name:file.name||'unnamed',size,total,fileType:file.type||'application/octet-stream',target:tgt,senderPeer:null,selfId:null,cwnd:4,ssthresh:64,rttCount:0,nextIdx:0,retryQueue:[],inFlight:new Map(),acked:new Set(),confirmations:new Set(),paused:false,cancelled:false,done:false,complete:false,startTime:nowT(),samples:[],ackedBytes:0,speedMBs:0,etaSec:null,hash:null,pumpRunning:false};
+  const tr={id,role:'send',file,name:file.name||'unnamed',size,total,fileType:file.type||'application/octet-stream',target:tgt,senderPeer:null,selfId:null,declinedPeers:new Set(),declinedAll:false,cwnd:4,ssthresh:64,rttCount:0,nextIdx:0,retryQueue:[],inFlight:new Map(),acked:new Set(),confirmations:new Set(),paused:false,cancelled:false,done:false,complete:false,startTime:nowT(),samples:[],ackedBytes:0,speedMBs:0,etaSec:null,hash:null,pumpRunning:false};
   try{ tr.selfId=(window.Search&&(window.Search.myId))||null; }catch(_){}
   transfers.set(id,tr);
   netSend(tgt,{t:'file-announce',id,name:tr.name,size,total,fileType:tr.fileType,sender:tr.selfId});
@@ -597,6 +599,19 @@ function onAck(tr,idx){ const inf=tr.inFlight.get(idx); if(inf){ try{clearTimeou
 function onChunkTimeout(tid,idx){ const tr=transfers.get(tid); if(!tr||tr.role!=='send'||tr.cancelled||tr.done) return; if(tr.acked.has(idx)) return; tr.inFlight.delete(idx); decreaseCongestion(tr); if(!tr.retryQueue.includes(idx)) tr.retryQueue.unshift(idx); uiUpdate(tr); pumpSender(tr).catch(()=>{}); }
 function onMissing(tr,missing){ if(!Array.isArray(missing)||!missing.length) return; let applied=false; for(const raw of missing.slice(0,500)){ const idx=Math.floor(raw); if(idx>=tr.total) continue; if(tr.acked.has(idx)) tr.acked.delete(idx); const inf=tr.inFlight.get(idx); if(inf){ try{clearTimeout(inf.timer);}catch(_){} tr.inFlight.delete(idx); } if(!tr.retryQueue.includes(idx)) tr.retryQueue.push(idx); applied=true; }
   if(applied){ decreaseCongestion(tr); if(!tr.paused&&!tr.cancelled&&!tr.done) pumpSender(tr).catch(()=>{}); uiUpdate(tr); } }
+function checkAllDeclined(tr){
+  // Every known peer declined: finish as declined-by-all instead of spinning on ACKs that never come.
+  if(!tr||tr.role!=='send'||tr.done||tr.cancelled||tr.complete) return;
+  if(!tr.declinedPeers||!tr.declinedPeers.size) return;
+  let me=null; try{ me=window.Search&&window.Search.myId; }catch(_){}
+  let known=[];
+  try{ known=[...window.Search.peers.keys()]; }catch(_){}
+  try{ const km=window.Search.knownMesh; if(Array.isArray(km)) km.forEach(id=>{ if(!known.includes(id)) known.push(id); }); }catch(_){}
+  known=known.filter(id=>id&&id!==me);
+  if(!known.length) return; // nobody to judge by — stay alive for whoever comes back
+  for(const id of known){ if(!tr.declinedPeers.has(id)) return; }
+  tr.declinedAll=true; finishSend(tr);
+}
 function finishSend(tr){ if(tr.done) return; tr.done=true; tr.complete=true; for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); tr.speedMBs=0; tr.etaSec=0; uiUpdate(tr); uiRender(); }
 function pauseTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send') return false; tr.paused=true; uiUpdate(tr); return true; }
 function resumeTransfer(id){ const tr=transfers.get(id); if(!tr||tr.role!=='send') return false; if(tr.cancelled||tr.done||tr.complete) return false; tr.paused=false; uiUpdate(tr); if(tr.role==='send') pumpSender(tr).catch(()=>{}); return true; }
@@ -638,6 +653,7 @@ async function assembleRecv(id){ const tr=transfers.get(id); if(!tr||tr.role!=='
 function handleHello(peerId){ if(!peerId) return; let me=null; try{ me=window.Search&&window.Search.myId; }catch(_){}
   for(const tr of transfers.values()){ if(tr.cancelled||tr.done) continue;
     if(tr.role!=='send') continue;
+    if(tr.declinedPeers&&tr.declinedPeers.has(peerId)) continue; // opted out: don't re-announce to them
     if(me&&tr.selfId!==me) tr.selfId=me; // we may have reclaimed a new peer ID since the transfer started
     try{ const ann={t:'file-announce',id:tr.id,name:tr.name,size:tr.size,total:tr.total,fileType:tr.fileType,sender:tr.selfId}; if(tr.hash) ann.sha256=tr.hash; netSendTo(peerId,ann); }catch(_){}
     try{ pumpSender(tr).catch(()=>{}); }catch(_){} // nudge stalled senders now that a peer is back
@@ -650,7 +666,30 @@ async function handleFileMsg(msg,peerId){ try{ if(!msg||typeof msg.t!=='string')
       case 'file-ack': { const tr=transfers.get(msg.id); if(!tr||tr.role!=='send') return true; onAck(tr,Math.floor(msg.idx)); return true; }
       case 'file-missing': { const tr=transfers.get(msg.id); if(!tr) return true; if(tr.role==='send') onMissing(tr,msg.missing); return true; }
       case 'file-done-ack': { const tr=transfers.get(msg.id); if(tr&&tr.role==='send'&&peerId){ tr.confirmations.add(peerId); uiUpdate(tr); } return true; }
-      case 'file-cancel': { const tr=transfers.get(msg.id); if(tr&&!tr.complete){ tr.cancelled=true; if(tr.role==='send'){ for(const [,v] of tr.inFlight){ try{clearTimeout(v.timer);}catch(_){} } tr.inFlight.clear(); } else { try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){} if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; } } uiUpdate(tr); uiRender(); } return true; }
+      case 'file-cancel': {
+        const tr=transfers.get(msg.id);
+        if(tr&&!tr.complete){
+          if(tr.role==='send'){
+            // Per-peer decline: one receiver opting out must NOT abort the broadcast for everyone else.
+            if(!tr.declinedPeers) tr.declinedPeers=new Set();
+            if(peerId) tr.declinedPeers.add(peerId);
+            uiUpdate(tr); checkAllDeclined(tr);
+          } else {
+            // Recv role: only the actual sender can abort our download — ignore stray cancels.
+            // (Falls back to honoring when we hold no open conn to the recorded sender,
+            // e.g. it just reincarnated with a new id and we haven't adopted it yet.)
+            let fromSender=false;
+            try{ fromSender=(peerId===tr.senderPeer)||!(((window.Search.peers.get(tr.senderPeer)||{}).conn||{}).open); }catch(_){ fromSender=(peerId===tr.senderPeer); }
+            if(!fromSender) return true;
+            tr.cancelled=true;
+            try{ if(tr.missingTimer) clearInterval(tr.missingTimer); }catch(_){}
+            tr.missingTimer=null;
+            if(tr.writable){ try{tr.writable.abort();}catch(_){} tr.writable=null; }
+            uiUpdate(tr); uiRender();
+          }
+        }
+        return true;
+      }
       default: return false; } }catch(_){ return true; } }
 window.FileV2={sendFileV2,pauseTransfer,resumeTransfer,cancelTransfer,transfers,handleFileMsg};
 })();
@@ -778,7 +817,7 @@ window.FileUI={
     el.querySelector('.t-name').textContent=(pub.role==='send'?'↑ ':'↓ ')+pub.name;
     el.querySelector('.t-stat').textContent=pct+'% • '+status;
     el.querySelector('.t-fill').style.width=pct+'%';
-    el.querySelector('.t-meta').textContent=fmtBytes(pub.ackedBytes||0)+' / '+fmtBytes(pub.size)+' • '+(pub.speedMBs||0).toFixed(2)+' MB/s • ETA '+fmtETA(pub.etaSec)+' • cwnd '+pub.cwnd+(pub.hash?(' • ⛨ '+(pub.hash||'').slice(0,10)+'…'):'');
+    el.querySelector('.t-meta').textContent=fmtBytes(pub.ackedBytes||0)+' / '+fmtBytes(pub.size)+' • '+(pub.speedMBs||0).toFixed(2)+' MB/s • ETA '+fmtETA(pub.etaSec)+' • cwnd '+pub.cwnd+(pub.hash?(' • ⛨ '+(pub.hash||'').slice(0,10)+'…'):'')+(pub.declined&&pub.declined.length?(' • declined: '+pub.declined.map(declineName).join(', ')):'');
     const bP=el.querySelector('[data-act="pause"]'); if(bP) bP.textContent=pub.paused?'Resume':'Pause';
     const bC=el.querySelector('[data-act="cancel"]'); if(bC) bC.disabled=!!pub.cancelled;
     el.querySelector('.t-conf').textContent=(pub.confirmations&&pub.confirmations.length)?('✓ '+pub.confirmations.length+' peer(s) confirmed'):'';
@@ -792,7 +831,7 @@ window.FileUI={
       d.className='msg me';
       const meta=document.createElement('div'); meta.className='meta'; meta.textContent='you • '+ts; d.appendChild(meta);
       const sp=document.createElement('div');
-      sp.textContent='⬆ '+pub.name+' ('+fmtBytes(pub.size)+') — sent ✓'+(pub.confirmations&&pub.confirmations.length?' ('+pub.confirmations.length+' confirmed)':'');
+      sp.textContent=pub.declinedAll?('⬆ '+pub.name+' ('+fmtBytes(pub.size)+') — declined by all peers, nobody received it'):('⬆ '+pub.name+' ('+fmtBytes(pub.size)+') — sent ✓'+(pub.confirmations&&pub.confirmations.length?' ('+pub.confirmations.length+' confirmed)':''));
       d.appendChild(sp);
     } else {
       if(!pub.url) return;
@@ -858,6 +897,7 @@ document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==
 
 /* fullscreen */
 $('#btnFull').addEventListener('click',async()=>{ try{ if(!document.fullscreenElement) await document.documentElement.requestFullscreen(); else await document.exitFullscreen(); }catch(e){ toast('Fullscreen blocked'); } });
+$('#btnExit').addEventListener('click',()=>{ try{ window.close(); }catch(e){} setTimeout(()=>{ try{ toast('Browser blocked tab-close — please close the tab manually'); }catch(_){} },300); });
 const imgOv=$('#imgOverlay'), imgEl=imgOv.querySelector('img');
 document.addEventListener('click',e=>{ const t=e.target.closest?e.target.closest('.msg img'):null; if(!t) return; imgEl.src=t.currentSrc||t.src; imgOv.style.display='flex'; });
 imgOv.addEventListener('click',()=>imgOv.style.display='none');
