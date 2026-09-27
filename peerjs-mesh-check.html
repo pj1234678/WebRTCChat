@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PeerJS Mesh Check — is it PeerJS or my code?</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔬</text></svg>">
+<script src="./peerjs.min.js"></script>
+<style>
+  :root{ --bg:#111214; --card:#1e1f22; --card2:#2b2d31; --line:#000; --txt:#dbdee1; --mut:#949ba4; --blue:#1a73e8; --green:#23a55a; --yellow:#f0b232; --red:#f23f43; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Arial,sans-serif;font-size:14px;padding:16px;max-width:1100px;margin:0 auto}
+  h1{font-size:18px;margin-bottom:2px} .sub{color:var(--mut);font-size:12px;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:320px 1fr;gap:12px} @media(max-width:860px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);margin-bottom:8px}
+  label{font-size:12px;color:var(--mut);display:block;margin:8px 0 4px}
+  input[type=text],input[type=password],input[type=number]{width:100%;background:#111214;border:1px solid #000;border-radius:8px;color:var(--txt);padding:9px 10px;font-size:13px;font-family:monospace;outline:none}
+  input:focus{border-color:var(--blue)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  button{background:var(--card2);border:0;color:var(--txt);border-radius:8px;padding:9px 13px;cursor:pointer;font-size:13px;font-weight:700}
+  button:hover{background:#3a3d44} button.primary{background:var(--blue);color:#fff} button.danger{background:#5c1a1d}
+  button:disabled{opacity:.5;cursor:wait}
+  .stat{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px}
+  .stat div{background:#111214;border:1px solid #000;border-radius:8px;padding:7px 9px}
+  .stat b{display:block;font-size:16px} .ok{color:var(--green)} .bad{color:var(--red)} .warn{color:var(--yellow)}
+  table{width:100%;border-collapse:collapse;font-size:12px;font-family:monospace}
+  th,td{text-align:left;padding:6px 7px;border-bottom:1px solid #2c2e33;vertical-align:top}
+  th{color:var(--mut);font-size:11px;text-transform:uppercase}
+  .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:800}
+  .pill.open{background:#0f3d22;color:#7bf1a8} .pill.conn{background:#3d2f0f;color:#ffd970} .pill.shut{background:#3d0f11;color:#ff9a9a} .pill.idle{background:#2b2d31;color:var(--mut)}
+  #matrix td,#matrix th{text-align:center} #matrix td:first-child,#matrix th:first-child{text-align:left}
+  .cell-ok{color:var(--green);font-weight:900} .cell-miss{color:var(--red);font-weight:900} .cell-unk{color:var(--mut)}
+  #log{background:#0a0b0c;border:1px solid #000;border-radius:8px;padding:8px;font-family:monospace;font-size:11px;height:340px;overflow-y:auto;white-space:pre-wrap}
+  .chk{display:flex;gap:8px;align-items:center;font-size:12px;margin-top:8px;color:var(--txt)}
+  .chk input{width:auto}
+  code{background:#111214;padding:1px 5px;border-radius:5px;font-size:11px}
+  .verdict{font-size:14px;font-weight:800;padding:10px;border-radius:10px;text-align:center;margin-bottom:8px}
+  .verdict.full{background:#0f3d22;color:#7bf1a8} .verdict.split{background:#3d0f11;color:#ffb4b4} .verdict.wait{background:#2b2d31;color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>🔬 PeerJS Mesh Check</h1>
+<div class="sub">Minimal, <b>independent</b> full-mesh test — none of super-mesh-chat's gossip/retry/glare code. Same room-ID scheme + same STUN + same PeerJS cloud, so a missing edge here means <b>PeerJS/signaling/NAT</b>, not your app. Close <code>super-mesh-chat.html</code> while testing (same room IDs would cross-talk).</div>
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <h2>Join</h2>
+      <label>Display name</label>
+      <input id="inName" type="text" maxlength="24" placeholder="e.g. Tester-A">
+      <label>Room password (same derivation as super-mesh-chat)</label>
+      <input id="inPass" type="password" placeholder="room password" autocomplete="current-password">
+      <label>Health-check interval (seconds)</label>
+      <input id="inInterval" type="number" min="2" max="30" value="5">
+      <div class="chk"><input id="optGlare" type="checkbox"><span>Deterministic glare fix (smaller-id dials, like your app). <b>OFF = raw PeerJS</b> (recommended for the blame test).</span></div>
+      <div class="chk"><input id="optAuto" type="checkbox" checked><span>Auto redial missing peers every check</span></div>
+      <div class="row">
+        <button id="btnJoin" class="primary">Join</button>
+        <button id="btnLeave">Leave</button>
+      </div>
+      <div class="row">
+        <button id="btnAudit">Audit now</button>
+        <button id="btnCopy">Copy log</button>
+        <button id="btnClear">Clear</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Status</h2>
+      <div class="stat">
+        <div>my id<b id="stId" style="font-size:11px;word-break:break-all">—</b></div>
+        <div>role<b id="stRole">—</b></div>
+        <div>signaling<b id="stSig">—</b></div>
+        <div>known / open<b><span id="stKnown">0</span> / <span id="stOpen">0</span></b></div>
+        <div>dials → opens<b><span id="stDials">0</span> → <span id="stOpens">0</span></b></div>
+        <div>errors<b id="stErrs">0</b></div>
+        <div>pongs missed<b id="stMiss">0</b></div>
+        <div>uptime<b id="stUp">—</b></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>How to run the 3-client blame test</h2>
+      <div style="font-size:12px;line-height:1.6;color:var(--txt)">
+        1. Open this file in <b>3 windows/devices</b> (2 houses ideally).<br>
+        2. Same password in all 3 → Join (one becomes host, two become guests).<br>
+        3. Wait ~30s. Watch <b>Mesh verdict</b> + matrix below.<br>
+        4. If verdict says <b>SPLIT</b> here too → it's PeerJS / NAT / signaling, <b>not your chat code</b>.<br>
+        5. If mesh here is always FULL but chat app splits → the bug is in your app's reconcile/glare/heartbeat logic.
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Mesh verdict (built from every peer's reported view)</h2>
+      <div id="verdict" class="verdict wait">NOT JOINED</div>
+      <table id="matrix"><thead><tr><th>who \ sees</th></tr></thead><tbody></tbody></table>
+      <div style="font-size:11px;color:var(--mut);margin-top:6px">✓ = reports an OPEN data channel to that peer &nbsp; ✕ = checker peer reports not-open &nbsp; ? = unknown (no view yet, stale, or super-mesh-chat app dialect which sends no open-list — run this checker on that device for a verdict)</div>
+    </div>
+    <div class="card">
+      <h2>Peers (my direct view)</h2>
+      <table id="peerTbl"><thead><tr><th>peer</th><th>dir</th><th>state</th><th>ping</th><th>dials/opens</th><th>last error</th><th></th></tr></thead><tbody><tr><td colspan="7" style="color:var(--mut)">not joined</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Log (timestamped — copy this when reporting a split)</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ================================================================
+   PeerJS Mesh Check — deliberately MINIMAL, independent of the app.
+   Same ROOM_PREFIX derivation + same ICE + same PeerJS cloud so the
+   network conditions are identical. Everything else is as dumb as
+   possible: gossip ids, dial missing, ping/pong, audit on interval.
+   ================================================================ */
+const $ = s => document.querySelector(s);
+const ROOM_PREFIX = 'superconf-mesh-';   // SAME as super-mesh-chat.html
+const CHANNEL = 'mesh-v1';               // SAME label
+const ICE_CONFIG = { config: { iceServers: [
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+] } };
+
+function roomIdFromPass(p){
+  p = String(p || '').trim();
+  if (!p) return ROOM_PREFIX + 'secretpassword';
+  if (p.indexOf(ROOM_PREFIX) === 0) return p.slice(0, 64);
+  const clean = p.replace(/[^\w\-]/g, '').slice(0, 40) || 'secretpassword';
+  return (ROOM_PREFIX + clean).slice(0, 64);
+}
+const short = id => !id ? '—' : String(id).length > 10 ? String(id).slice(0,6)+'…'+String(id).slice(-2) : String(id);
+const tstr = () => new Date().toLocaleTimeString('en-GB',{hour12:false}) + '.' + String(Date.now()%1000).padStart(3,'0');
+
+const logEl = $('#log');
+function log(...a){
+  const line = '[' + tstr() + '] ' + a.map(x => typeof x === 'object' ? JSON.stringify(x) : String(x)).join(' ');
+  const div = document.createElement('div');
+  div.textContent = line;
+  logEl.appendChild(div);
+  while (logEl.children.length > 600) logEl.firstChild.remove();
+  logEl.scrollTop = logEl.scrollHeight;
+  try { console.log('[mesh-check]', ...a); } catch(e){}
+}
+
+/* ---------------- state ---------------- */
+let peer = null, myId = null, isHost = false, ROOM_ID = null;
+let myName = 'Tester-' + Math.floor(1000 + Math.random()*9000);
+let joinAt = 0, sigState = 'idle';
+let auditTimer = null, hbTimer = null;
+const mesh = new Map();   // pid -> {id,name,conn,dir,state,dials,opens,closes,lastErr,lastPingMs,lastPongAt,lastSeen,pendingDial}
+const remoteViews = new Map(); // pid -> {name, open:[ids], at}
+const stats = { dials:0, opens:0, errs:0, miss:0 };
+const errByType = {};
+
+function setSig(s){ sigState = s; $('#stSig').textContent = s; }
+function refreshStats(){
+  let open = 0;
+  mesh.forEach(r => { if (anyOpen(r)) open++; });
+  $('#stKnown').textContent = mesh.size;
+  $('#stOpen').textContent = open;
+  $('#stDials').textContent = stats.dials;
+  $('#stOpens').textContent = stats.opens;
+  $('#stErrs').textContent = stats.errs + (Object.keys(errByType).length ? ' (' + Object.entries(errByType).map(([k,v])=>k+':'+v).join(', ') + ')' : '');
+  $('#stMiss').textContent = stats.miss;
+  $('#stUp').textContent = joinAt ? Math.round((Date.now()-joinAt)/1000) + 's' : '—';
+}
+setInterval(refreshStats, 1000);
+
+/* ---------------- join / leave ---------------- */
+function join(){
+  if (peer && !peer.destroyed) leave(true);
+  const pass = $('#inPass').value;
+  if (!String(pass).trim()) { log('⚠ type a room password first'); return; }
+  const nm = $('#inName').value.trim();
+  if (nm) myName = nm.slice(0,24);
+  try { localStorage.setItem('smc_room_pass', String(pass).trim()); } catch(e){}
+  ROOM_ID = roomIdFromPass(pass);
+  mesh.clear(); remoteViews.clear();
+  Object.keys(errByType).forEach(k => delete errByType[k]);
+  stats.dials = stats.opens = stats.errs = stats.miss = 0;
+  joinAt = Date.now();
+  $('#stId').textContent = '…';
+  $('#stRole').textContent = '…';
+  log('joining room', ROOM_ID, 'as', myName, '| raw-PeerJS mode, glareFix=' + ($('#optGlare').checked ? 'ON' : 'OFF'));
+  tryHost();
+}
+function leave(silent){
+  stopTimers();
+  mesh.forEach(r => { try { (r.all||[]).forEach(c => { try{ c.close(); }catch(e){} }); if (r.conn) { try{ r.conn.close(); }catch(e){} } } catch(e){} if (r.pendingDial) { try{ clearTimeout(r.pendingDial); }catch(e){} } });
+  mesh.clear(); remoteViews.clear();
+  if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
+  myId = null; isHost = false; setSig('idle');
+  $('#stId').textContent = '—'; $('#stRole').textContent = '—';
+  renderPeers(); renderMatrix();
+  $('#verdict').className = 'verdict wait'; $('#verdict').textContent = 'LEFT';
+  if (!silent) log('left room');
+}
+function tryHost(){
+  isHost = true;
+  let p;
+  try { p = new Peer(ROOM_ID, { debug: 1, ...ICE_CONFIG }); }
+  catch(e){ log('host Peer() threw, falling back to guest:', e.message); return fallbackGuest(); }
+  attach(p, true);
+}
+function fallbackGuest(){
+  isHost = false;
+  let p;
+  try { p = new Peer({ debug: 1, ...ICE_CONFIG }); }
+  catch(e){ log('guest Peer() threw:', e.message); return; }
+  attach(p, false);
+}
+function attach(p, hostMode){
+  peer = p;
+  setSig('connecting-signaling…');
+  const epoch = p;
+  p.on('open', id => {
+    if (peer !== epoch) { try{ p.destroy(); }catch(e){} return; }
+    myId = id; isHost = hostMode;
+    setSig('signaling-open');
+    $('#stId').textContent = myId;
+    $('#stRole').textContent = hostMode ? 'HOST (' + ROOM_ID.slice(0,24) + '…)' : 'guest';
+    log('✓ signaling open. myId=', myId, hostMode ? '(HOST — I own the room id)' : '(guest)');
+    if (!hostMode) dial(ROOM_ID, 'initial-host-dial');
+    startTimers();
+    setTimeout(() => gossip(), 400);
+    renderPeers(); renderMatrix();
+  });
+  p.on('connection', c => {
+    if (peer !== epoch) { try{ c.close(); }catch(e){} return; }
+    if (c.label && c.label !== CHANNEL) { log('ignoring conn with foreign label', c.label); return; }
+    c._incoming = true;
+    setupConn(c);
+  });
+  p.on('call', () => {});
+  p.on('disconnected', () => { if (peer !== epoch || p._idTaken) return; setSig('signaling-disconnected — reconnecting…'); log('⚠ signaling disconnected, peer.reconnect()…'); try { p.reconnect(); } catch(e){ log('reconnect threw:', e.message); } });
+  p.on('close', () => { if (peer !== epoch || p._idTaken) return; setSig('signaling-closed'); log('✕ signaling closed'); });
+  p.on('error', err => {
+    if (peer !== epoch) return;
+    const type = (err && err.type) || 'unknown';
+    errByType[type] = (errByType[type]||0)+1; stats.errs++; refreshStats();
+    // PeerJS v1.5.4 reports id-taken as "unavailable-id" (not "unavailable-id-taken").
+    // Match the same broad check as super-mesh-chat.html.
+    if (type === 'unavailable-id-taken' || type === 'unavailable-id' || (type && (type.indexOf('unavailable-id') === 0 || type.indexOf('taken') >= 0))) {
+      log('room id taken → joining as guest…');
+      p._idTaken = true; // suppress the disconnected/close cascade below
+      try { p.destroy(); } catch(e){}
+      if (peer === epoch) fallbackGuest();
+    } else if (type === 'peer-unavailable') {
+      log('peer-unavailable:', (err && err.message) || '(a dial found no such id — normal for stale gossip)');
+    } else {
+      log('signaling error [' + type + ']:', (err && err.message) || err);
+    }
+  });
+}
+
+/* ---------------- connections (deliberately dumb) ---------------- */
+function dial(pid, why){
+  if (!peer || peer.destroyed || !myId || !pid || pid === myId) return;
+  let rec = mesh.get(pid);
+  if (rec && anyOpen(rec)) return;                 // already up (on at least one conn)
+  if (rec && rec.pendingDial) return;                // dial in flight
+  if (!rec) { rec = blankRec(pid); mesh.set(pid, rec); }
+  const glareFix = $('#optGlare').checked;
+  if (glareFix && myId && pid && String(myId) > String(pid)) {
+    // deterministic rule (same as app): larger id waits for the smaller id's dial.
+    // still dial after a while so a dead smaller-id can't wedge us forever.
+    log('glare-fix: deferring dial to', short(pid), '(they should dial me)');
+  }
+  rec.dials++; stats.dials++;
+  log('→ dial', short(pid), '(' + (why||'audit') + ', attempt #' + rec.dials + ')');
+  rec.pendingDial = setTimeout(() => {
+    rec.pendingDial = null;
+    if (!peer || peer.destroyed || pid === myId) return;
+    if (anyOpen(mesh.get(pid))) return;
+    let c;
+    try { c = peer.connect(pid, { label: CHANNEL, reliable: true }); }
+    catch(e){ rec.lastErr = 'connect-threw'; log('✕ peer.connect threw for', short(pid), e.message); scheduleRedial(pid); return; }
+    if (!c) { rec.lastErr = 'no-conn-obj'; scheduleRedial(pid); return; }
+    c._incoming = false;
+    // open watchdog: raw PeerJS sometimes never fires open NOR error (NAT blackhole)
+    c._watchdog = setTimeout(() => {
+      if (c.open) return;
+      const r = mesh.get(pid);
+      if (r && (r.all||[]).includes(c) && !anyOpen(r)) {
+        r.lastErr = 'open-timeout(15s)';
+        log('✕ OPEN TIMEOUT 15s →', short(pid), '(dial sent, no open, no error — classic NAT/STUN blackhole)');
+        try { c.close(); } catch(e){}
+      }
+    }, 15000);
+    setupConn(c);
+  }, glareFix && String(myId) > String(pid) ? 4000 + Math.random()*3000 : Math.random()*800);
+}
+function blankRec(pid){ return { id:pid, name:'…', conn:null, all:[], dir:'—', state:'idle', dials:0, opens:0, closes:0, lastErr:'', lastPingMs:-1, lastPongAt:0, lastSeen:0 }; }
+function anyOpen(rec){ return !!(rec && rec.all && rec.all.some(c => { try { return c.open; } catch(e){ return false; } })); }
+function openCount(rec){ if (!rec || !rec.all) return 0; let n = 0; rec.all.forEach(c => { try { if (c.open) n++; } catch(e){} }); return n; }
+
+function setupConn(conn){
+  const pid = conn.peer;
+  if (!pid || pid === myId) { try{ conn.close(); }catch(e){} return; }
+  let rec = mesh.get(pid);
+  if (!rec) { rec = blankRec(pid); mesh.set(pid, rec); }
+  const glareFix = $('#optGlare').checked;
+  if (rec.conn && rec.conn !== conn && rec.conn.open && conn._incoming) {
+    // RAW mode: TRULY keep both — every live conn is tracked in rec.all and
+    // gossip/ping is processed on all of them. The matrix must never go stale
+    // because we orphaned a conn that is still passing data.
+    log('⚡ GLARE: incoming duplicate from', short(pid), 'while outgoing open — tracking BOTH (raw mode).');
+  } else if (rec.conn && rec.conn !== conn) {
+    if (glareFix && myId && pid) {
+      const iAmDialer = String(myId) < String(pid);
+      const newIsOutgoing = !conn._incoming;
+      if (newIsOutgoing !== iAmDialer) { log('glare-fix: dropping loser conn with', short(pid)); try{ conn.close(); }catch(e){} return; }
+      log('glare-fix: replacing conn with', short(pid));
+      try { rec.conn.close(); } catch(e){}
+      try { rec.all = (rec.all||[]).filter(c => c !== rec.conn); } catch(e){}
+    } else if (!glareFix) {
+      log('tracking extra conn with', short(pid), '(prev stored open=' + !!(rec.conn && rec.conn.open) + ', now tracking ' + ((rec.all||[]).length+1) + ')');
+    }
+  }
+  if (!rec.all) rec.all = [];
+  if (!rec.all.includes(conn)) rec.all.push(conn);
+  rec.conn = conn;
+  rec.dir = conn._incoming ? 'in' : 'out';
+  rec.state = 'connecting';
+  rec.lastSeen = Date.now();
+  conn.on('open', () => {
+    if (conn._watchdog) { clearTimeout(conn._watchdog); conn._watchdog = null; }
+    if (!rec.all.includes(conn)) rec.all.push(conn);
+    rec.conn = conn; // newest-open is the display primary; older ones stay tracked
+    rec.state = 'open'; rec.opens++; stats.opens++;
+    rec.lastErr = ''; rec.lastSeen = Date.now();
+    log('✓ OPEN with', short(pid), '(' + (rec.name||'?') + ', dir=' + rec.dir + ')');
+    try { conn.send({ t:'hello', id: myId, name: myName }); } catch(e){}
+    gossipTo(pid);
+    renderPeers(); renderMatrix(); refreshStats();
+  });
+  conn.on('data', msg => onData(pid, msg, conn));
+  conn.on('close', () => {
+    if (conn._watchdog) { clearTimeout(conn._watchdog); conn._watchdog = null; }
+    try { rec.all = (rec.all||[]).filter(c => c !== conn); } catch(e){}
+    rec.closes++;
+    if (anyOpen(rec)) {
+      log('closed one conn with', short(pid), '(' + (rec.name||'?') + '), ' + openCount(rec) + ' still open — staying UP');
+      if (rec.conn === conn) { try { rec.conn = rec.all.filter(c => { try{return c.open;}catch(e){return false;} })[0] || null; } catch(e){ rec.conn = null; } }
+      renderPeers(); renderMatrix();
+      return;
+    }
+    rec.conn = null; rec.state = 'closed';
+    log('✕ CLOSED last conn with', short(pid), '(' + (rec.name||'?') + ')');
+    renderPeers(); renderMatrix();
+    scheduleRedial(pid);
+  });
+  conn.on('error', e => {
+    const m = String((e && (e.type || e.message)) || 'conn-error').slice(0,50);
+    rec.lastErr = m; stats.errs++; errByType['conn:'+m.slice(0,20)] = (errByType['conn:'+m.slice(0,20)]||0)+1;
+    log('✕ conn ERROR with', short(pid), ':', m);
+    renderPeers();
+  });
+  renderPeers();
+}
+function scheduleRedial(pid){
+  if (!$('#optAuto').checked) return;
+  const rec = mesh.get(pid);
+  if (!rec || rec.pendingDial) return;
+  if (!peer || peer.destroyed || !myId) return;
+  rec.pendingDial = setTimeout(() => { rec.pendingDial = null; dial(pid, 'redial'); }, 3000 + Math.random()*2000);
+}
+
+/* ---------------- messages ---------------- */
+function onData(pid, msg, conn){
+  if (!msg || typeof msg !== 'object') return;
+  let rec = mesh.get(pid);
+  if (!rec) { rec = blankRec(pid); mesh.set(pid, rec); }
+  rec.lastSeen = Date.now();
+  // NOTE: no stale-duplicate drop here on purpose. This is a diagnostic: gossip
+  // arriving on ANY live conn from this peer is evidence. Dropping it is how a
+  // healthy peer ends up rendered as ✕✕✕ in the matrix.
+  switch (msg.t) {
+    case 'hello':
+      if (msg.name) rec.name = String(msg.name).slice(0,24);
+      if (!rec.greeted) { rec.greeted = true; try { conn.send({ t:'hello', id: myId, name: myName }); } catch(e){} }
+      log('  hello ⇄', short(pid), '(' + rec.name + ') — data flows ✓');
+      renderPeers(); renderMatrix();
+      break;
+    case 'mesh-sync': {
+      if (msg.name) rec.name = String(msg.name).slice(0,24);
+      // The real app's mesh-sync has NO 'open' field (it sends {peers,id,name}).
+      // Missing field = app dialect: its connectivity is UNKNOWN, never ✕.
+      const hasOpen = Array.isArray(msg.open);
+      remoteViews.set(pid, { name: rec.name, open: hasOpen ? msg.open.slice() : [], hasOpen, at: Date.now() });
+      if (Array.isArray(msg.peers)) msg.peers.forEach(p => {
+        if (!p || !p.id || p.id === myId || p.id === pid) return;
+        if (!mesh.has(p.id)) { mesh.set(p.id, blankRec(p.id)); log('  discovered new peer via gossip:', short(p.id), '(' + (p.name||'?') + ' via ' + short(pid) + ')'); }
+        const r = mesh.get(p.id);
+        if (p.name && r.name === '…') r.name = String(p.name).slice(0,24);
+        if (!anyOpen(r) && !r.pendingDial) dial(p.id, 'gossip-from-' + short(pid));
+      });
+      renderMatrix(); renderPeers();
+      break; }
+    case 'peer-list': {
+      // App-dialect discovery message ({peers,id,name}, no open list).
+      if (msg.name) rec.name = String(msg.name).slice(0,24);
+      const cur = remoteViews.get(pid);
+      if (!cur) remoteViews.set(pid, { name: rec.name, open: [], hasOpen: false, at: 0 }); // known-peer, view unknown
+      else if (!cur.hasOpen) { cur.name = rec.name; }
+      if (Array.isArray(msg.peers)) msg.peers.forEach(p => {
+        if (!p || !p.id || p.id === myId || p.id === pid) return;
+        if (!mesh.has(p.id)) { mesh.set(p.id, blankRec(p.id)); log('  discovered new peer via peer-list:', short(p.id), '(' + (p.name||'?') + ' via ' + short(pid) + ')'); }
+        const r = mesh.get(p.id);
+        if (p.name && r.name === '…') r.name = String(p.name).slice(0,24);
+        if (!anyOpen(r) && !r.pendingDial) dial(p.id, 'peerlist-from-' + short(pid));
+      });
+      renderMatrix(); renderPeers();
+      break; }
+    case 'ping':
+      try { conn.send({ t:'pong', ts: msg.ts, id: myId }); } catch(e){}
+      break;
+    case 'pong': {
+      const rtt = Date.now() - (msg.ts || Date.now());
+      rec.lastPingMs = Math.max(0, rtt); rec.lastPongAt = Date.now();
+      renderPeers();
+      break; }
+  }
+}
+function myOpenList(){
+  const out = [];
+  mesh.forEach((r, id) => { if (anyOpen(r)) out.push(id); });
+  return out;
+}
+function sendOnAllOpen(rec, msg){
+  let sent = 0;
+  (rec.all||[]).forEach(c => { try { if (c.open) { c.send(msg); sent++; } } catch(e){} });
+  if (!sent && rec.conn) { try { if (rec.conn.open) { rec.conn.send(msg); sent++; } } catch(e){} }
+  return sent;
+}
+function gossip(){
+  if (!peer || !myId) return;
+  const peers = [...mesh.values()].map(r => ({ id: r.id, name: r.name }));
+  peers.push({ id: myId, name: myName });
+  const msg = { t:'mesh-sync', id: myId, name: myName, peers, open: myOpenList() };
+  mesh.forEach(r => { sendOnAllOpen(r, msg); });
+}
+function gossipTo(pid){
+  const rec = mesh.get(pid);
+  if (!rec || !anyOpen(rec)) return;
+  const peers = [...mesh.values()].map(r => ({ id: r.id, name: r.name }));
+  peers.push({ id: myId, name: myName });
+  try { sendOnAllOpen(rec, { t:'mesh-sync', id: myId, name: myName, peers, open: myOpenList() }); } catch(e){}
+}
+
+/* ---------------- periodic health check (the point of this file) ---------------- */
+function audit(reason){
+  if (!peer || peer.destroyed || !myId) { log('audit skipped — not joined'); return; }
+  const iv = Math.max(2, Math.min(30, parseInt($('#inInterval').value, 10) || 5));
+  log('—— AUDIT (' + (reason||'timer') + ') —— known=' + mesh.size + ' open=' + myOpenList().length);
+  // 1. gossip current view
+  gossip();
+  // 2. dial everyone known-but-not-open
+  mesh.forEach((r, id) => {
+    if (id === myId) return;
+    if (anyOpen(r)) {
+      // 3. ping open peers, flag half-open (open but no data flowing)
+      try { sendOnAllOpen(r, { t:'ping', ts: Date.now(), id: myId }); } catch(e){ r.lastErr = 'ping-send-fail'; }
+      const sincePong = r.lastPongAt ? Math.round((Date.now()-r.lastPongAt)/1000) : -1;
+      if (r.lastPongAt && Date.now()-r.lastPongAt > iv*1000*3) {
+        stats.miss++;
+        log('  ⚠ HALF-OPEN suspect:', short(id), '(' + r.name + ') open but no pong for ' + sincePong + 's — SCTP wedged? will redial');
+        try { (r.all||[]).forEach(c => { try{ c.close(); }catch(e){} }); } catch(e){}
+      }
+    } else if (!r.pendingDial) {
+      dial(id, 'audit-missing');
+    }
+  });
+  // dump what each peer REPORTS (with age + dialect) — stale empty views,
+  // app-dialect peers (no open field), and fresh empty views mean very different things
+  remoteViews.forEach((v, pid) => {
+    const age = v.at ? Math.round((Date.now()-v.at)/1000) : -1;
+    const dialect = v.hasOpen ? 'checker' : 'APP-DIALECT(no open field)';
+    log('  view ' + short(pid) + ' (' + (v.name||'?') + ', ' + dialect + ', sync ' + (age>=0?age+'s ago':'never') + '): open=[' + (v.open||[]).map(short).join(', ') + ']');
+  });
+  // guests: always want the host
+  if (!isHost && ROOM_ID && ROOM_ID !== myId) {
+    const h = mesh.get(ROOM_ID);
+    if (!anyOpen(h) && !(h && h.pendingDial)) dial(ROOM_ID, 'audit-host');
+  }
+  renderPeers(); renderMatrix(); refreshStats();
+}
+function startTimers(){
+  stopTimers();
+  const iv = Math.max(2, Math.min(30, parseInt($('#inInterval').value, 10) || 5));
+  auditTimer = setInterval(() => audit('every-' + iv + 's'), iv * 1000);
+  hbTimer = setInterval(() => { // light ping between audits
+    mesh.forEach(r => { try { sendOnAllOpen(r, { t:'ping', ts: Date.now(), id: myId }); } catch(e){} });
+  }, 5000);
+  log('health-check started: full audit every ' + iv + 's + ping every 5s');
+}
+function stopTimers(){ if (auditTimer) clearInterval(auditTimer); auditTimer = null; if (hbTimer) clearInterval(hbTimer); hbTimer = null; }
+
+/* ---------------- rendering ---------------- */
+function renderPeers(){
+  const tb = $('#peerTbl tbody');
+  tb.innerHTML = '';
+  if (!myId) { tb.innerHTML = '<tr><td colspan="7" style="color:var(--mut)">not joined</td></tr>'; return; }
+  if (!mesh.size) { tb.innerHTML = '<tr><td colspan="7" style="color:var(--mut)">no peers yet — open a 2nd window with the same password</td></tr>'; return; }
+  [...mesh.values()].forEach(r => {
+    const tr = document.createElement('tr');
+    const nOpen = openCount(r);
+    const open = nOpen > 0;
+    const pill = open ? '<span class="pill open">OPEN' + (nOpen>1 ? ' ×'+nOpen : '') + '</span>' : (r.pendingDial || r.state==='connecting' ? '<span class="pill conn">DIALING</span>' : '<span class="pill shut">SHUT</span>');
+    const ping = r.lastPingMs >= 0 ? r.lastPingMs + 'ms' : '—';
+    tr.innerHTML = '<td>' + escapeHtml(r.name||'…') + '<br><span style="color:var(--mut)">' + escapeHtml(short(r.id)) + '</span></td>' +
+      '<td>' + r.dir + '</td><td>' + pill + '</td><td>' + ping + '</td><td>' + r.dials + '/' + r.opens + '</td>' +
+      '<td style="max-width:180px;overflow:hidden">' + escapeHtml(r.lastErr||'') + '</td>';
+    const td = document.createElement('td');
+    const b1 = document.createElement('button'); b1.textContent = 'redial'; b1.style.padding = '4px 8px';
+    b1.onclick = () => { if (r.pendingDial) { clearTimeout(r.pendingDial); r.pendingDial = null; } try { (r.all||[]).forEach(c => { try{ c.close(); }catch(e){} }); } catch(e){} r.conn = null; dial(r.id, 'manual'); };
+    td.appendChild(b1);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  });
+}
+function renderMatrix(){
+  const tbl = $('#matrix');
+  const thead = tbl.querySelector('thead tr');
+  const tbody = tbl.querySelector('tbody');
+  // all ids: me + known + anyone mentioned in remote views
+  const ids = [];
+  if (myId) ids.push(myId);
+  mesh.forEach((r,id) => { if (!ids.includes(id)) ids.push(id); });
+  remoteViews.forEach((v,pid) => {
+    if (!ids.includes(pid)) ids.push(pid);
+    (v.open||[]).forEach(o => { if (o !== myId && !ids.includes(o) && mesh.has(o)) {} });
+  });
+  thead.innerHTML = '<th>who \\ sees</th>' + ids.map(id => '<th title="' + escapeHtml(id) + '">' + escapeHtml(id===myId ? 'ME' : short(id)) + '</th>').join('');
+  tbody.innerHTML = '';
+  const myOpen = new Set(myOpenList());
+  ids.forEach(rowId => {
+    const tr = document.createElement('tr');
+    let rowName;
+    if (rowId === myId) rowName = 'ME (' + escapeHtml(myName) + ')';
+    else {
+      const vv = remoteViews.get(rowId);
+      const age = vv && vv.at ? Math.round((Date.now()-vv.at)/1000) + 's ago' : 'never';
+      const stale = !vv || !vv.at || (Date.now()-vv.at > 20000) ? ' STALE' : '';
+      const dial = vv && !vv.hasOpen ? ' app?' : '';
+      rowName = escapeHtml(short(rowId)) + '<br><span style="color:var(--mut);font-size:10px">sync ' + age + stale + dial + '</span>';
+    }
+    let html = '<td title="' + escapeHtml(rowId) + '">' + rowName + '</td>';
+    ids.forEach(colId => {
+      if (rowId === colId) { html += '<td class="cell-unk">·</td>'; return; }
+      let sees = null;
+      if (rowId === myId) sees = myOpen.has(colId);
+      else {
+        const v = remoteViews.get(rowId);
+        if (!v || !v.at) sees = null;
+        else if (!v.hasOpen) sees = null; // app dialect: unknown, render ? not ✕
+        else sees = (v.open||[]).includes(colId);
+      }
+      html += sees === true ? '<td class="cell-ok">✓</td>' : sees === false ? '<td class="cell-miss">✕</td>' : '<td class="cell-unk">?</td>';
+    });
+    tr.innerHTML = html;
+    tbody.appendChild(tr);
+  });
+  // verdict: FULL only if every pair that knows each other reports open both ways (or at least my row full + remotes fresh)
+  const v = $('#verdict');
+  if (!myId) { v.className = 'verdict wait'; v.textContent = 'NOT JOINED'; return; }
+  if (!ids.length || (ids.length === 1)) { v.className = 'verdict wait'; v.textContent = 'WAITING — only me so far (open a 2nd window)'; return; }
+  let missing = [];
+  const appDialect = [];
+  ids.forEach(a => {
+    if (a !== myId) {
+      const va = remoteViews.get(a);
+      if (!va || !va.hasOpen) { if (!appDialect.includes(a)) appDialect.push(a); return; } // can't verify app-dialect peers
+    }
+    ids.forEach(b => {
+      if (a === b) return;
+      let s = (a === myId) ? myOpen.has(b) : ((remoteViews.get(a)||{}).open||[]).includes(b);
+      if (!s) missing.push(short(a) + '→' + short(b));
+    });
+  });
+  // only count remotes with a fresh view (<20s); stale views shouldn't condemn the mesh
+  const now = Date.now();
+  const stalePeers = [...remoteViews.entries()].filter(([k,vv]) => vv.hasOpen && vv.at && now - vv.at > 20000).map(([k]) => short(k));
+  const appNote = appDialect.length ? ' (app-dialect, unverifiable: ' + appDialect.map(short).join(', ') + ' — run the checker on those devices for a valid test)' : '';
+  if (!missing.length) { v.className = 'verdict full'; v.textContent = '✓ FULL MESH (checker peers) — all ' + (ids.length - appDialect.length) + ' verifiable nodes see each other' + appNote; }
+  else {
+    v.className = 'verdict split';
+    v.textContent = '✕ SPLIT MESH — ' + missing.length + ' directed edge(s) missing: ' + missing.slice(0,8).join(', ') + (missing.length>8 ? '…' : '') + (stalePeers.length ? ' (stale view: ' + stalePeers.join(',') + ')' : '') + appNote;
+    if (!v._lastSplit || now - v._lastSplit > 15000) { v._lastSplit = now; log('✕✕ SPLIT DETECTED: missing edges: ' + missing.join(', ')); }
+  }
+}
+setInterval(() => { if (myId) renderMatrix(); }, 3000);
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ---------------- wire UI ---------------- */
+$('#btnJoin').onclick = join;
+$('#btnLeave').onclick = () => leave(false);
+$('#btnAudit').onclick = () => audit('manual');
+$('#btnClear').onclick = () => { logEl.innerHTML = ''; };
+$('#btnCopy').onclick = async () => {
+  const txt = [...logEl.children].map(d => d.textContent).join('\n');
+  try { await navigator.clipboard.writeText(txt); log('(log copied to clipboard)'); }
+  catch(e){ log('clipboard failed — select the log manually'); }
+};
+$('#inInterval').onchange = () => { if (myId) startTimers(); };
+try {
+  const saved = localStorage.getItem('smc_room_pass');
+  if (saved) $('#inPass').value = saved;
+  const nm = localStorage.getItem('smc_name');
+  if (nm) $('#inName').value = nm;
+} catch(e){}
+$('#inName').onchange = e => { try { localStorage.setItem('smc_name', e.target.value); } catch(_){} };
+window.addEventListener('beforeunload', () => { try { peer && peer.destroy(); } catch(e){} });
+(function peerjsFallback(){
+  if (typeof Peer !== 'undefined') { log('PeerJS loaded (local ./peerjs.min.js). Ready — enter password + Join.'); return; }
+  log('local peerjs.min.js missing — trying CDN…');
+  const cdn = ['https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js','https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js'];
+  (function next(i){
+    if (typeof Peer !== 'undefined') { log('PeerJS loaded from CDN. Ready.'); return; }
+    if (i >= cdn.length) { log('✕ PeerJS failed to load everywhere — check network.'); return; }
+    const s = document.createElement('script'); s.src = cdn[i];
+    s.onload = () => setTimeout(() => next(i+1), 100);
+    s.onerror = () => next(i+1);
+    document.head.appendChild(s);
+  })(0);
+})();
+</script>
+</body>
+</html>
