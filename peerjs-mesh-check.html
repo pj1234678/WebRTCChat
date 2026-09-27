@@ -53,6 +53,15 @@
       <input id="inPass" type="password" placeholder="room password" autocomplete="current-password">
       <label>Health-check interval (seconds)</label>
       <input id="inInterval" type="number" min="2" max="30" value="5">
+      <label>TURN credentials URL (recommended — free Metered signup, paste your endpoint)</label>
+      <input id="turnApiUrl" type="text" placeholder="https://xxx.metered.live/api/v1/turn/credentials?apiKey=yyy">
+      <div style="font-size:11px;color:var(--mut);margin-top:4px">Dashboard → TURN Server → Show API Key → copy the credentials URL. Returns STUN+TURN array (20 GB/mo free). Stored only in this browser's localStorage.</div>
+      <label>…or manual TURN url (fallback/override)</label>
+      <input id="turnUrl" type="text" placeholder="turn:host:3478 or turns:host:5349">
+      <div class="row">
+        <div style="flex:1;min-width:120px"><label>TURN user</label><input id="turnUser" type="text" placeholder="user"></div>
+        <div style="flex:1;min-width:120px"><label>TURN pass</label><input id="turnPass" type="password" placeholder="pass"></div>
+      </div>
       <div class="chk"><input id="optGlare" type="checkbox"><span>Deterministic glare fix (smaller-id dials, like your app). <b>OFF = raw PeerJS</b> (recommended for the blame test).</span></div>
       <div class="chk"><input id="optAuto" type="checkbox" checked><span>Auto redial missing peers every check</span></div>
       <div class="row">
@@ -119,11 +128,74 @@
 const $ = s => document.querySelector(s);
 const ROOM_PREFIX = 'superconf-mesh-';   // SAME as super-mesh-chat.html
 const CHANNEL = 'mesh-v1';               // SAME label
-const ICE_CONFIG = { config: { iceServers: [
+const STUN_SERVERS = [
   { urls: 'stun:stun.cloudflare.com:3478' },
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' }
-] } };
+];
+// Default TURN credentials endpoint for testing (your Metered key, your quota).
+const DEFAULT_TURN_APIURL = 'https://turnedup.metered.live/api/v1/turn/credentials?apiKey=723d1df5eca74b97f642d15c376141695324';
+// Manual TURN fallback defaults (same account, single relay entry).
+const DEFAULT_TURN_URL = 'turn:global.relay.metered.ca:80';
+const DEFAULT_TURN_USER = '7f6a16e0d4a333a188746ce7';
+const DEFAULT_TURN_PASS = 'vlWnwWgNMlnm0efk';
+// TURN is optional but decisive: if a pair works only via relay, STUN-only will
+// flap exactly like Balls below (open+hello OK, pongs never arrive).
+// Two ways to configure (checked in this order):
+//  1. Credentials URL (recommended): your Metered credentials endpoint. Fetched
+//     at Join time, returns a full STUN+TURN iceServers array. Needs 'Join'
+//     pressed with network access; result is used for this session only.
+//  2. Manual turn:host + user/pass boxes below (fallback/override).
+let dynamicIce = null; // fetched iceServers array for this session
+async function fetchTurnServers(){
+  dynamicIce = null;
+  let apiUrl = '';
+  try {
+    apiUrl = ($('#turnApiUrl') && $('#turnApiUrl').value || '').trim() || localStorage.getItem('mc_turn_apiurl') || DEFAULT_TURN_APIURL || '';
+    if (apiUrl) localStorage.setItem('mc_turn_apiurl', apiUrl);
+  } catch(e){}
+  if (!apiUrl) return null;
+  log('fetching TURN credentials…');
+  try {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => { try{ ctrl.abort(); }catch(e){} }, 12000);
+    const res = await fetch(apiUrl, { signal: ctrl.signal });
+    clearTimeout(to);
+    if (!res.ok) {
+      if (res.status === 401) log('✕ TURN fetch: HTTP 401 = key rejected. Check TWO things: (1) the subdomain matches your Metered Domain exactly (Dashboard → Developers), (2) the key is the TURN API Key from Dashboard → TURN Server → "Show API Key" (not the secret key, not a pk_live publishable key). Continuing STUN-only.');
+      else log('✕ TURN credential fetch failed: HTTP ' + res.status + ' — continuing STUN-only');
+      return null;
+    }
+    const arr = await res.json();
+    if (!Array.isArray(arr) || !arr.length) { log('✕ TURN endpoint returned no servers — continuing STUN-only'); return null; }
+    dynamicIce = arr;
+    const hasTurn = arr.some(s => String((s.urls||s.url||'')).startsWith('turn'));
+    log('✓ TURN credentials fetched (' + arr.length + ' entries' + (hasTurn ? ', includes relay' : ', NO relay entry!') + ')');
+    return arr;
+  } catch(e){ log('✕ TURN fetch error (' + (e && e.message || e) + ') — continuing STUN-only'); return null; }
+}
+function buildIceConfig(){
+  let url = '', user = '', pass = '';
+  try {
+    url = ($('#turnUrl') && $('#turnUrl').value || '').trim() || localStorage.getItem('mc_turn_url') || DEFAULT_TURN_URL || '';
+    user = ($('#turnUser') && $('#turnUser').value || '') || localStorage.getItem('mc_turn_user') || DEFAULT_TURN_USER || '';
+    pass = ($('#turnPass') && $('#turnPass').value || '') || localStorage.getItem('mc_turn_pass') || DEFAULT_TURN_PASS || '';
+    if (url) { localStorage.setItem('mc_turn_url', url); localStorage.setItem('mc_turn_user', user); localStorage.setItem('mc_turn_pass', pass); }
+  } catch(e){}
+  const servers = STUN_SERVERS.slice();
+  if (dynamicIce && dynamicIce.length) {
+    // fetched array already contains STUN+TURN; merge without duplicating our STUN
+    dynamicIce.forEach(s => {
+      const u = String(s.urls || s.url || '');
+      if (u.startsWith('stun')) return;
+      servers.push(s);
+    });
+    try { log('ICE: STUN + fetched TURN (' + servers.filter(s => String(s.urls||s.url||'').startsWith('turn')).length + ' relay entries)'); } catch(e){}
+  }
+  if (url) servers.push({ urls: url, username: user || undefined, credential: pass || undefined });
+  try { if (url) log('ICE: STUN + TURN(' + url + ')'); else log('ICE: STUN-only (no TURN configured — NAT-pair failures will NOT relay)'); } catch(e){}
+  return { config: { iceServers: servers } };
+}
 
 function roomIdFromPass(p){
   p = String(p || '').trim();
@@ -171,7 +243,7 @@ function refreshStats(){
 setInterval(refreshStats, 1000);
 
 /* ---------------- join / leave ---------------- */
-function join(){
+async function join(){
   if (peer && !peer.destroyed) leave(true);
   const pass = $('#inPass').value;
   if (!String(pass).trim()) { log('⚠ type a room password first'); return; }
@@ -186,6 +258,10 @@ function join(){
   $('#stId').textContent = '…';
   $('#stRole').textContent = '…';
   log('joining room', ROOM_ID, 'as', myName, '| raw-PeerJS mode, glareFix=' + ($('#optGlare').checked ? 'ON' : 'OFF'));
+  const bj = $('#btnJoin');
+  try { if (bj) bj.disabled = true; } catch(e){}
+  try { await fetchTurnServers(); } catch(e){}
+  try { if (bj) bj.disabled = false; } catch(e){}
   tryHost();
 }
 function leave(silent){
@@ -202,14 +278,14 @@ function leave(silent){
 function tryHost(){
   isHost = true;
   let p;
-  try { p = new Peer(ROOM_ID, { debug: 1, ...ICE_CONFIG }); }
+  try { p = new Peer(ROOM_ID, { debug: 1, ...buildIceConfig() }); }
   catch(e){ log('host Peer() threw, falling back to guest:', e.message); return fallbackGuest(); }
   attach(p, true);
 }
 function fallbackGuest(){
   isHost = false;
   let p;
-  try { p = new Peer({ debug: 1, ...ICE_CONFIG }); }
+  try { p = new Peer({ debug: 1, ...buildIceConfig() }); }
   catch(e){ log('guest Peer() threw:', e.message); return; }
   attach(p, false);
 }
@@ -612,6 +688,11 @@ try {
   if (saved) $('#inPass').value = saved;
   const nm = localStorage.getItem('smc_name');
   if (nm) $('#inName').value = nm;
+  const tu = localStorage.getItem('mc_turn_url'); $('#turnUrl').value = tu || DEFAULT_TURN_URL || '';
+  const tn = localStorage.getItem('mc_turn_user'); $('#turnUser').value = tn || DEFAULT_TURN_USER || '';
+  const tp = localStorage.getItem('mc_turn_pass'); $('#turnPass').value = tp || DEFAULT_TURN_PASS || '';
+  const ta = localStorage.getItem('mc_turn_apiurl'); if (ta) $('#turnApiUrl').value = ta;
+  else if (typeof DEFAULT_TURN_APIURL !== 'undefined' && DEFAULT_TURN_APIURL) $('#turnApiUrl').value = DEFAULT_TURN_APIURL;
 } catch(e){}
 $('#inName').onchange = e => { try { localStorage.setItem('smc_name', e.target.value); } catch(_){} };
 window.addEventListener('beforeunload', () => { try { peer && peer.destroy(); } catch(e){} });
