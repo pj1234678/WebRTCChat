@@ -143,6 +143,8 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
   .msg{max-width:92%}
   #chatStream .transfer{max-width:92%}
   #toolbar{gap:6px}
+  #msgInput{min-width:0}
+  #btnSend{padding:12px 13px;font-size:16px}
   .tgl{width:38px;height:38px;font-size:15px}
 }
 </style>
@@ -183,7 +185,7 @@ body{height:100vh;height:100dvh;background:var(--bg-main);color:var(--text);font
       <button id="btnScreen" class="tgl" title="Share screen">🖥️</button>
       <button id="btnFile" class="tgl" title="Send file">📎</button>
       <input id="msgInput" placeholder="Message…" autocomplete="off" maxlength="2000">
-      <button id="btnSend">Send</button>
+      <button id="btnSend" title="Send" aria-label="Send">➤</button>
     </footer>
   </main>
 </div>
