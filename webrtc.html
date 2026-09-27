@@ -222,8 +222,8 @@ const ROOM_PREFIX='superconf-mesh-';
 function roomIdFromPass(p){ p=String(p||'').trim(); if(!p) return ROOM_PREFIX+'secretpassword'; if(p.indexOf(ROOM_PREFIX)===0) return p.slice(0,64); const clean=p.replace(/[^\w\-]/g,'').slice(0,40)||'secretpassword'; return (ROOM_PREFIX+clean).slice(0,64); }
 let ROOM_ID=roomIdFromPass((function(){ try{ return localStorage.getItem('smc_room_pass')||'secretpassword'; }catch(e){ return 'secretpassword'; } })());
 function currentPass(){ if(ROOM_ID.indexOf(ROOM_PREFIX)===0) return ROOM_ID.slice(ROOM_PREFIX.length); return ROOM_ID; }
-const HB_INTERVAL=5000, WARN_AFTER=20000, DEAD_AFTER=40000, PENDING_AFTER=35000, MAX_RETRY=5; // PENDING_AFTER > openTo(25s): don't reap dials still in flight; guest-guest retries forever (see connectToPeer)
-let peer=null,myId=null,isHost=false,hbTimer=null,meshSyncTimer=null,reconcileTimer=null,hostTimer=null,epoch=0,initAttempt=0,initRetryTo=null,lastMeshUp=0,lastReclaim=0,lastHostUp=0;
+const HB_INTERVAL=500, WARN_AFTER=20000, DEAD_AFTER=40000, PENDING_AFTER=35000, MAX_RETRY=5; // PENDING_AFTER > openTo(25s): don't reap dials still in flight; guest-guest retries forever (see connectToPeer)
+let peer=null,myId=null,isHost=false,hbTimer=null,meshSyncTimer=null,reconcileTimer=null,hostTimer=null,epoch=0,initAttempt=0,initRetryTo=null,lastMeshUp=0,lastReclaim=0,lastHostUp=0,hbTick=0;
 const peers=new Map();
 const pendingRetry=new Map();
 const meshMembers=new Map(); // id -> lastSeenMs; survives handleClose so reconcileMesh can resurrect forgotten peers (no more manual rejoin)
@@ -284,7 +284,7 @@ function forgiveNuclear(){
 }
 function nuclearRestart(reason){
   const nowN=Date.now();
-  if(nowN-lastNuclear<45000) return; // cooldown: don't spin if the network is still down
+  if(nowN-lastNuclear<15000) return; // cooldown: don't spin if the network is still down
   if(!peer||!myId) return;
   lastNuclear=nowN; nuclearCount++;
   const wasHost=isHost;
@@ -495,7 +495,7 @@ function handleMessage(pid,msg,srcConn){
     case 'typing': emit('smc-typing',pid,msg); break;
     case 'presence': if(msg.name) rec.name=String(msg.name).slice(0,24); if(msg.left){ try{meshMembers.delete(pid);}catch(e){} handleClose(pid,null); } emit('smc-presence',pid,msg); onPeersChanged(); break;
     case 'ping': sendTo(pid,{t:'pong',ts:msg.ts,id:myId}); break;
-    case 'pong': rec.latency=Math.max(0,Date.now()-(msg.ts||Date.now())); rec.lastPing=Date.now(); { const _n=Date.now(); if(!rec._lastUi||_n-rec._lastUi>2000){ rec._lastUi=_n; onPeersChanged(); } } break;
+    case 'pong': rec.latency=Math.max(0,Date.now()-(msg.ts||Date.now())); rec.lastPing=Date.now(); { const _n=Date.now(); if(!rec._lastUi||_n-rec._lastUi>500){ rec._lastUi=_n; onPeersChanged(); } } break;
     case 'signal': emit('smc-signal',pid,msg); break;
     default: emit('smc-data',pid,msg); break;
   }
@@ -503,7 +503,7 @@ function handleMessage(pid,msg,srcConn){
 function sendPeerList(pid){ const list=[...peers.values()].filter(p=>p.id!==pid&&p.conn&&p.conn.open&&!p.pending).map(p=>({id:p.id,name:p.name})); list.push({id:myId,name:myName}); sendTo(pid,{t:'peer-list',peers:list,id:myId,name:myName}); }
 function broadcast(obj){ peers.forEach(rec=>{ try{ if(rec.conn&&rec.conn.open){ rec.conn.send(obj); rec.tx=(rec.tx||0)+1; } }catch(e){} }); }
 function sendTo(id,obj){ const rec=peers.get(id); if(!rec||!rec.conn||!rec.conn.open) return false; try{ rec.conn.send(obj); rec.tx=(rec.tx||0)+1; return true; }catch(e){ return false; } }
-function startHeartbeat(){ stopHeartbeat(); if(!lastMeshUp) lastMeshUp=Date.now(); hbTimer=setInterval(()=>{ const nowT=Date.now(); peers.forEach((rec,id)=>{ try{ if(rec.conn&&rec.conn.open) rec.conn.send({t:'ping',ts:nowT,id:myId}); }catch(e){} const idle=nowT-(rec.lastPing||nowT); if(rec.pending){ if(idle>PENDING_AFTER&&!pendingRetry.has(id)){ const oc=rec.conn&&rec.conn._openTo; if(!oc) dropStale(id); } } else if(idle>DEAD_AFTER){ dropStale(id); } else if(idle>WARN_AFTER&&rec.status!=='yellow'){ rec.status='yellow'; } }); try{ let _o=0; peers.forEach(function(r){ if(r.conn&&r.conn.open) _o++; }); updateConn(!!(isHost||_o>0)); }catch(e){} onPeersChanged(); },HB_INTERVAL); meshSyncTimer=setInterval(()=>{ sendMeshSync(); },15000); reconcileTimer=setInterval(()=>{ reconcileMesh(); },10000); hostTimer=setInterval(()=>{ hostWatchdog(); },10000); }
+function startHeartbeat(){ stopHeartbeat(); hbTick=0; if(!lastMeshUp) lastMeshUp=Date.now(); hbTimer=setInterval(()=>{ const nowT=Date.now(); hbTick=(hbTick+1)%4; peers.forEach((rec,id)=>{ try{ if(rec.conn&&rec.conn.open) rec.conn.send({t:'ping',ts:nowT,id:myId}); }catch(e){} const idle=nowT-(rec.lastPing||nowT); if(rec.pending){ if(idle>PENDING_AFTER&&!pendingRetry.has(id)){ const oc=rec.conn&&rec.conn._openTo; if(!oc) dropStale(id); } } else if(idle>DEAD_AFTER){ dropStale(id); } else if(idle>WARN_AFTER&&rec.status!=='yellow'){ rec.status='yellow'; } }); try{ let _o=0; peers.forEach(function(r){ if(r.conn&&r.conn.open) _o++; }); updateConn(!!(isHost||_o>0)); }catch(e){} if(!hbTick) onPeersChanged(); },HB_INTERVAL); meshSyncTimer=setInterval(()=>{ sendMeshSync(); },15000); reconcileTimer=setInterval(()=>{ reconcileMesh(); },10000); hostTimer=setInterval(()=>{ hostWatchdog(); },10000); }
 function hostWatchdog(){
   try{
     if(!peer||peer.destroyed||!myId) return;
