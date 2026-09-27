@@ -223,6 +223,10 @@ let peer = null, myId = null, isHost = false, ROOM_ID = null;
 let myName = 'Tester-' + Math.floor(1000 + Math.random()*9000);
 let joinAt = 0, sigState = 'idle';
 let auditTimer = null, hbTimer = null;
+// nuclear-restart state: detects churn (conns dying seconds after open across
+// multiple peers = wedged local stack, not a sick remote) and reincarnates.
+const deathLog = []; // {at, pid} for conns that died <5s after open
+let restartCount = 0, lastRestartAt = 0, restartArmed = false;
 const mesh = new Map();   // pid -> {id,name,conn,dir,state,dials,opens,closes,lastErr,lastPingMs,lastPongAt,lastSeen,pendingDial}
 const remoteViews = new Map(); // pid -> {name, open:[ids], at}
 const stats = { dials:0, opens:0, errs:0, miss:0 };
@@ -266,6 +270,7 @@ async function join(){
 }
 function leave(silent){
   stopTimers();
+  restartArmed = false; // cancel any pending nuclear restart
   mesh.forEach(r => { try { (r.all||[]).forEach(c => { try{ c.close(); }catch(e){} }); if (r.conn) { try{ r.conn.close(); }catch(e){} } } catch(e){} if (r.pendingDial) { try{ clearTimeout(r.pendingDial); }catch(e){} } });
   mesh.clear(); remoteViews.clear();
   if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
@@ -313,7 +318,12 @@ function attach(p, hostMode){
   });
   p.on('call', () => {});
   p.on('disconnected', () => { if (peer !== epoch || p._idTaken) return; setSig('signaling-disconnected — reconnecting…'); log('⚠ signaling disconnected, peer.reconnect()…'); try { p.reconnect(); } catch(e){ log('reconnect threw:', e.message); } });
-  p.on('close', () => { if (peer !== epoch || p._idTaken) return; setSig('signaling-closed'); log('✕ signaling closed'); });
+  p.on('close', () => {
+    if (peer !== epoch || p._idTaken) return;
+    setSig('signaling-closed');
+    if (myId && mesh.size) { nuclearRestart('signaling channel closed mid-session'); return; }
+    log('✕ signaling closed');
+  });
   p.on('error', err => {
     if (peer !== epoch) return;
     const type = (err && err.type) || 'unknown';
@@ -399,6 +409,7 @@ function setupConn(conn){
   }
   if (!rec.all) rec.all = [];
   if (!rec.all.includes(conn)) rec.all.push(conn);
+  conn._bornAt = Date.now(); conn._openedAt = 0;
   rec.conn = conn;
   rec.dir = conn._incoming ? 'in' : 'out';
   rec.state = 'connecting';
@@ -406,6 +417,7 @@ function setupConn(conn){
   conn.on('open', () => {
     if (conn._watchdog) { clearTimeout(conn._watchdog); conn._watchdog = null; }
     if (!rec.all.includes(conn)) rec.all.push(conn);
+    conn._openedAt = Date.now();
     rec.conn = conn; // newest-open is the display primary; older ones stay tracked
     rec.state = 'open'; rec.opens++; stats.opens++;
     rec.lastErr = ''; rec.lastSeen = Date.now();
@@ -419,6 +431,14 @@ function setupConn(conn){
     if (conn._watchdog) { clearTimeout(conn._watchdog); conn._watchdog = null; }
     try { rec.all = (rec.all||[]).filter(c => c !== conn); } catch(e){}
     rec.closes++;
+    // churn signal: opened then died within 5s. A few of these = normal glare/
+    // redial noise; a burst across peers = local stack wedged → reincarnate.
+    try {
+      if (conn._openedAt && Date.now() - conn._openedAt < 5000) {
+        deathLog.push({ at: Date.now(), pid });
+        maybeNuclearRestart();
+      }
+    } catch(e){}
     if (anyOpen(rec)) {
       log('closed one conn with', short(pid), '(' + (rec.name||'?') + '), ' + openCount(rec) + ' still open — staying UP');
       if (rec.conn === conn) { try { rec.conn = rec.all.filter(c => { try{return c.open;}catch(e){return false;} })[0] || null; } catch(e){ rec.conn = null; } }
@@ -444,6 +464,47 @@ function scheduleRedial(pid){
   if (!rec || rec.pendingDial) return;
   if (!peer || peer.destroyed || !myId) return;
   rec.pendingDial = setTimeout(() => { rec.pendingDial = null; dial(pid, 'redial'); }, 3000 + Math.random()*2000);
+}
+/* Churn detector + nuclear restart: when conns die seconds after opening across
+   MULTIPLE peers, per-conn redial can never win (your 09:01 log: 17 dials, every
+   conn dead in ~1s on both legs). Only a full teardown — destroy Peer, drop all
+   state, fresh Peer object (fresh random ID for guests, same room ID reclaimed
+   for the host) — clears a wedged local stack. Single-pair flaps (Balls) do NOT
+   trigger this: that's a sick path, and the cure there is TURN, not reincarnation. */
+function maybeNuclearRestart(){
+  try {
+    const now = Date.now();
+    while (deathLog.length && now - deathLog[0].at > 60000) deathLog.shift();
+    if (deathLog.length < 6) return;
+    const peers = new Set(deathLog.map(d => d.pid));
+    if (peers.size < 2 && mesh.size > 1) return; // one sick pair ≠ wedged stack
+    nuclearRestart('churn: ' + deathLog.length + ' conns died <5s after open across ' + peers.size + ' peer(s) in 60s');
+  } catch(e){}
+}
+function nuclearRestart(reason){
+  const now = Date.now();
+  if (now - lastRestartAt < 45000) { log('restart suppressed (45s cooldown) — ' + reason); return; }
+  if (!peer || !myId) return; // not joined; nothing to reincarnate
+  lastRestartAt = now; restartCount++;
+  const wasHost = isHost;
+  const delay = Math.min(2000 * Math.pow(2, Math.min(restartCount - 1, 4)), 20000) + Math.floor(Math.random() * 1500);
+  log('☢ NUCLEAR RESTART #' + restartCount + ' in ' + Math.round(delay) + 'ms — ' + reason);
+  log('  full teardown: closing ' + mesh.size + ' peer(s), destroying Peer, rejoining as ' + (wasHost ? 'HOST (reclaim room id)' : 'guest (fresh random id)') + '…');
+  stopTimers();
+  try { mesh.forEach(r => { try { (r.all||[]).forEach(c => { try { c.close(); } catch(e){} }); } catch(e){} if (r.pendingDial) { try { clearTimeout(r.pendingDial); } catch(e){} } }); } catch(e){}
+  mesh.clear(); remoteViews.clear(); deathLog.length = 0;
+  const old = peer; peer = null; myId = null; isHost = false;
+  try { old && old.destroy(); } catch(e){}
+  setSig('restarting…');
+  try { $('#stId').textContent = '…'; $('#stRole').textContent = '…'; } catch(e){}
+  renderPeers(); renderMatrix();
+  restartArmed = true;
+  setTimeout(() => {
+    if (!restartArmed) return; // user hit Leave meanwhile
+    restartArmed = false;
+    if (peer) return;
+    if (wasHost) tryHost(); else fallbackGuest();
+  }, delay);
 }
 
 /* ---------------- messages ---------------- */
@@ -563,6 +624,8 @@ function audit(reason){
     const h = mesh.get(ROOM_ID);
     if (!anyOpen(h) && !(h && h.pendingDial)) dial(ROOM_ID, 'audit-host');
   }
+  // sustained full mesh forgives past restarts (backoff decays on health)
+  try { if (mesh.size && myOpenList().length === mesh.size && restartCount) restartCount = 0; } catch(e){}
   renderPeers(); renderMatrix(); refreshStats();
 }
 function startTimers(){
